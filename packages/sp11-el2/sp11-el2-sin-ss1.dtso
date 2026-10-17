@@ -1,0 +1,5 @@
+/dts-v1/;
+/plugin/;
+/* EL2: el estado de sistema SS1 en uso normal parece dejar colgado el RPMh (peticiones -110 y CPU sin despertar).
+ * Solo DRIPS (domain_ss3), que ya es «solo en suspensión». 16-10-2026 */
+&system_pd { domain-idle-states = <&domain_ss3>; };

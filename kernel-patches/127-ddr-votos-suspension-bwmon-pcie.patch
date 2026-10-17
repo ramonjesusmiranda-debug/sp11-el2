@@ -1,0 +1,83 @@
+From: Claude (CT108) <claude@ct108>
+Subject: soc: qcom: icc-bwmon / PCI: qcom: drop DDR votes in s2idle (X1E80100 EL2)
+
+Tracing icc_set_bw across s2idle on a Surface Pro 11 at EL2 showed DDR LPM never entered because two votes stayed
+on ebi: the CPU bwmon (24091000.pmu, 800 MB/s peak, no PM ops) and pcie-qcom's 1 kBps "keep data path" vote.
+bwmon: add suspend/resume that stops the monitor and drops the OPP vote. pcie-qcom: vote 0 in suspend-to-idle.
+
+Update 17-10: the zero PCIe vote hung the SoC entering s2idle at EL2, so it is opt-in (pcie_qcom.s2idle_zero_vote).
+
+--- a/drivers/soc/qcom/icc-bwmon.c
++++ b/drivers/soc/qcom/icc-bwmon.c
+@@ -815,6 +815,34 @@
+ 	free_irq(bwmon->irq, bwmon);
+ }
+ 
++/*
++ * The bandwidth vote of the last sample stays in place across system suspend, which keeps DDR out of its low-power
++ * modes (X1E80100: CPU bwmon left 800 MB/s peak on ebi, DDR LPM never entered in s2idle). Drop it while suspended.
++ */
++static int bwmon_suspend(struct device *dev)
++{
++	struct icc_bwmon *bwmon = dev_get_drvdata(dev);
++
++	disable_irq(bwmon->irq);
++	bwmon_disable(bwmon);
++	dev_pm_opp_set_opp(dev, NULL);
++	bwmon->current_kbps = 0;
++
++	return 0;
++}
++
++static int bwmon_resume(struct device *dev)
++{
++	struct icc_bwmon *bwmon = dev_get_drvdata(dev);
++
++	bwmon_start(bwmon);
++	enable_irq(bwmon->irq);
++
++	return 0;
++}
++
++static DEFINE_SIMPLE_DEV_PM_OPS(bwmon_pm_ops, bwmon_suspend, bwmon_resume);
++
+ static const struct icc_bwmon_data msm8998_bwmon_data = {
+ 	.sample_ms = 4,
+ 	.count_unit_kb = 1024,
+@@ -879,6 +907,7 @@
+ 	.driver = {
+ 		.name = "qcom-bwmon",
+ 		.of_match_table = bwmon_of_match,
++		.pm = pm_sleep_ptr(&bwmon_pm_ops),
+ 	},
+ };
+ module_platform_driver(bwmon_driver);
+--- a/drivers/pci/controller/dwc/pcie-qcom.c
++++ b/drivers/pci/controller/dwc/pcie-qcom.c
+@@ -2199,6 +2199,10 @@
+ 	return ret;
+ }
+ 
++/* EL2 experiment: zero PCIe-MEM vote in s2idle; the first try hung the SoC on suspend, so it is opt-in */
++static bool s2idle_zero_vote;
++module_param(s2idle_zero_vote, bool, 0644);
++
+ static int qcom_pcie_suspend_noirq(struct device *dev)
+ {
+ 	struct qcom_pcie *pcie;
+@@ -2229,7 +2233,14 @@
+ 		 * functional during suspend.
+ 		 */
+ 		if (pcie->icc_mem) {
+-			ret = icc_set_bw(pcie->icc_mem, 0, kBps_to_icc(1));
++			/*
++			 * Any non-zero vote keeps DDR out of self-refresh; in s2idle nothing
++			 * moves data, so let the path drop to zero (X1E80100: DDR LPM was
++			 * never entered with the 1 kBps vote left by this driver).
++			 */
++			ret = icc_set_bw(pcie->icc_mem, 0,
++					 (s2idle_zero_vote && pm_suspend_target_state == PM_SUSPEND_TO_IDLE) ?
++					 0 : kBps_to_icc(1));
+ 			if (ret) {
+ 				dev_err(dev,
+ 					"Failed to set bandwidth for PCIe-MEM interconnect path: %d\n",

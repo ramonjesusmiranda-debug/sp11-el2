@@ -1,0 +1,31 @@
+--- a/drivers/cpuidle/cpuidle-psci.c	2026-10-17 07:39:27.413223736 +0200
++++ b/drivers/cpuidle/cpuidle-psci.c	2026-10-17 07:39:27.427925698 +0200
+@@ -31,6 +31,14 @@
+ #include "dt_idle_states.h"
+ #include "dt_idle_genpd.h"
+ 
++/*
++ * Surface Pro 11 en EL2: con cpuidle_psci.deep_off=1 los estados profundos nacen desactivados (CPUIDLE_FLAG_OFF) y
++ * se activan después desde /sys/devices/system/cpu/cpuN/cpuidle/stateN/disable. Entrar en CL5 durante el arranque
++ * dejaba CPUs colgadas (hard LOCKUP).
++ */
++static bool deep_off;
++module_param(deep_off, bool, 0444);
++
+ struct psci_cpuidle_data {
+ 	u32 *psci_states;
+ 	struct device *dev;
+@@ -409,6 +417,13 @@
+ 		return ret;
+ 	}
+ 
++	if (deep_off) {
++		int i;
++
++		for (i = 1; i < drv->state_count; i++)
++			drv->states[i].flags |= CPUIDLE_FLAG_OFF;
++	}
++
+ 	ret = cpuidle_register(drv, NULL);
+ 	if (ret)
+ 		goto deinit;

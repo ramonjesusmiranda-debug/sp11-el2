@@ -1,0 +1,12 @@
+[Unit]
+Description=Surface Pro 11 en EL2: módulos de reposo (AOSD bloqueado, Modern Standby al ADSP)
+ConditionKernelVersion=*sp11-el2*
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/modprobe aoss_cxsd_only
+ExecStart=/usr/bin/modprobe qcom_adsp_pwr_lmts
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

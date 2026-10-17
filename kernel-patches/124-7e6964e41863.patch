@@ -1,0 +1,66 @@
+From 7e6964e41863719b9e3282212f79c353c783d325 Mon Sep 17 00:00:00 2001
+From: Jens Glathe <jens.glathe@oldschoolsolutions.biz>
+Date: Thu, 14 May 2026 10:00:26 +0200
+Subject: [PATCH] arm64: dts: qcom: x1: Add x1-el2-pas.dtso for PAS-managed
+ remoteproc
+
+Commit 47c88db49f6c ("arm64: dts: qcom: hamoa: Add remoteproc IOMMUS
+in EL2 device trees") added IOMMU stream configuration for the ADSP and
+CDSP remote processors directly into x1-el2.dtso.
+
+This configuration is only needed when Linux at EL2 is responsible for
+fully managing remote processor loading and IOMMU setup via PAS
+(Peripheral Authentication Service). Other EL2 configurations do not
+require these properties in the same way.
+
+Introduce a small dedicated overlay (x1-el2-pas.dtso) that includes the
+base EL2 overlay and provides the remoteproc IOMMU configuration. This
+keeps the generic x1-el2.dtso suitable for the configurations it was
+originally intended for.
+
+Fixes: 47c88db49f6c ("arm64: dts: qcom: hamoa: Add remoteproc IOMMUS in EL2 device trees")
+
+Signed-off-by: Jens Glathe <jens.glathe@oldschoolsolutions.biz>
+---
+ arch/arm64/boot/dts/qcom/Makefile        |  2 +-
+ arch/arm64/boot/dts/qcom/x1-el2-pas.dtso | 18 ++++++++++++++++++
+ 2 files changed, 19 insertions(+), 1 deletion(-)
+ create mode 100644 arch/arm64/boot/dts/qcom/x1-el2-pas.dtso
+
+diff --git a/arch/arm64/boot/dts/qcom/Makefile b/arch/arm64/boot/dts/qcom/Makefile
+index aa8faeb5b3f203..0e572736331426 100644
+--- a/arch/arm64/boot/dts/qcom/Makefile
++++ b/arch/arm64/boot/dts/qcom/Makefile
+@@ -18,7 +18,7 @@ dtb-$(CONFIG_ARCH_QCOM)	+= eliza-mtp.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= glymur-crd.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= hamoa-iot-evk.dtb
+ 
+-hamoa-iot-evk-el2-dtbs	:= hamoa-iot-evk.dtb x1-el2.dtbo
++hamoa-iot-evk-el2-dtbs	:= hamoa-iot-evk.dtb x1-el2-pas.dtbo
+ 
+ dtb-$(CONFIG_ARCH_QCOM)	+= hamoa-iot-evk-el2.dtb
+ dtb-$(CONFIG_ARCH_QCOM)	+= hamoa-lenovo-ideacentre-mini-01q8x10.dtb
+diff --git a/arch/arm64/boot/dts/qcom/x1-el2-pas.dtso b/arch/arm64/boot/dts/qcom/x1-el2-pas.dtso
+new file mode 100644
+index 00000000000000..9db91adbcc566a
+--- /dev/null
++++ b/arch/arm64/boot/dts/qcom/x1-el2-pas.dtso
+@@ -0,0 +1,18 @@
++// SPDX-License-Identifier: BSD-3-Clause
++/*
++ * EL2 overlay variant for configurations where Linux manages remote
++ * processors via PAS (Peripheral Authentication Service).
++ */
++
++/dts-v1/;
++/plugin/;
++
++#include "x1-el2.dtso"
++
++&remoteproc_adsp {
++	iommus = <&apps_smmu 0x1000 0x80>;
++};
++
++&remoteproc_cdsp {
++	iommus = <&apps_smmu 0x0c00 0x0>;
++};

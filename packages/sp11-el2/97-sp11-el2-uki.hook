@@ -1,0 +1,14 @@
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = linux-sp11-el2
+Target = sp11-el2
+Target = x1e-sleep-modulos-dkms
+Target = mkinitcpio
+Target = systemd
+
+[Action]
+Description = Rehaciendo la imagen EL2 de la Surface Pro 11 (/boot/sl/el2.efi)...
+When = PostTransaction
+Exec = /usr/bin/sp11-el2-uki

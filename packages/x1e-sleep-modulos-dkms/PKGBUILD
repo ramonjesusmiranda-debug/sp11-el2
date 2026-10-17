@@ -1,0 +1,25 @@
+# Paquete local (Surface Pro 11, EL2): módulos de justririll/x1e-sleep que necesita el reposo profundo en EL2. 17-10-2026
+#  el1tmr: aparca el temporizador físico de EL1 que deja armado la UEFI y copia el vencimiento de CNTHP al dormir
+#  aoss_cxsd_only: pide al AOP que el sueño pare en CXSD (sin AOSD)   qcom_adsp_pwr_lmts: Modern Standby al ADSP
+#  asus_adsp_sleepstate: bit «sleepstate» de SMP2P hacia el ADSP, como qcsubsys de Windows
+# Solo se compilan para kernels *-sp11-el2 (en EL1 los DSP y temporizadores los gestiona Gunyah).
+pkgname=x1e-sleep-modulos-dkms
+pkgver=2026.10.17
+pkgrel=1
+pkgdesc="Módulos de x1e-sleep para el reposo profundo en EL2 (DKMS, solo linux-sp11-el2)"
+arch=("any")
+url="https://github.com/justririll/x1e-sleep"
+license=("GPL-2.0-only")
+depends=("dkms")
+source=("Makefile" "dkms.conf" "el1tmr.c" "aoss_cxsd_only.c" "qcom_adsp_pwr_lmts.c" "asus_adsp_sleepstate.c")
+sha256sums=("SKIP" "SKIP" "SKIP" "SKIP" "SKIP" "SKIP")
+noextract=()
+package() {
+  local d="$pkgdir/usr/src/x1e-sleep-modulos-$pkgver"
+  install -Dm644 Makefile -t "$d"
+  sed "s/@PKGVER@/$pkgver/" dkms.conf > "$d/dkms.conf"
+  install -Dm644 el1tmr.c -t "$d/el1tmr"
+  install -Dm644 aoss_cxsd_only.c -t "$d/aoss-cxsd-only"
+  install -Dm644 qcom_adsp_pwr_lmts.c -t "$d/adsp-pwr-lmts"
+  install -Dm644 asus_adsp_sleepstate.c -t "$d/adsp-sleepstate"
+}

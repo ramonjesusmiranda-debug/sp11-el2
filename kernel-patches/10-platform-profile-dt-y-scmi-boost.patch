@@ -1,0 +1,158 @@
+diff --git a/drivers/acpi/platform_profile.c b/drivers/acpi/platform_profile.c
+index 79d2e92e5c28d7..d50764cfb1172a 100644
+--- a/drivers/acpi/platform_profile.c
++++ b/drivers/acpi/platform_profile.c
+@@ -15,6 +15,8 @@
+ #define to_pprof_handler(d)	(container_of(d, struct platform_profile_handler, dev))
+ 
+ static DEFINE_MUTEX(profile_lock);
++static struct kobject *legacy_kobj;
++static bool own_legacy_kobj;
+ 
+ struct platform_profile_handler {
+ 	const char *name;
+@@ -216,7 +218,7 @@ static ssize_t profile_store(struct device *dev,
+ 			return ret;
+ 	}
+ 
+-	sysfs_notify(acpi_kobj, NULL, "platform_profile");
++	sysfs_notify(legacy_kobj, NULL, "platform_profile");
+ 
+ 	return count;
+ }
+@@ -436,7 +438,7 @@ static ssize_t platform_profile_store(struct kobject *kobj,
+ 			return ret;
+ 	}
+ 
+-	sysfs_notify(acpi_kobj, NULL, "platform_profile");
++	sysfs_notify(legacy_kobj, NULL, "platform_profile");
+ 
+ 	return count;
+ }
+@@ -482,7 +484,7 @@ void platform_profile_notify(struct device *dev)
+ 	scoped_cond_guard(mutex_intr, return, &profile_lock) {
+ 		_notify_class_profile(dev, NULL);
+ 	}
+-	sysfs_notify(acpi_kobj, NULL, "platform_profile");
++	sysfs_notify(legacy_kobj, NULL, "platform_profile");
+ }
+ EXPORT_SYMBOL_GPL(platform_profile_notify);
+ 
+@@ -532,7 +534,7 @@ int platform_profile_cycle(void)
+ 			return err;
+ 	}
+ 
+-	sysfs_notify(acpi_kobj, NULL, "platform_profile");
++	sysfs_notify(legacy_kobj, NULL, "platform_profile");
+ 
+ 	return 0;
+ }
+@@ -605,9 +607,9 @@ struct device *platform_profile_register(struct device *dev, const char *name,
+ 		goto cleanup_ida;
+ 	}
+ 
+-	sysfs_notify(acpi_kobj, NULL, "platform_profile");
++	sysfs_notify(legacy_kobj, NULL, "platform_profile");
+ 
+-	err = sysfs_update_group(acpi_kobj, &platform_profile_group);
++	err = sysfs_update_group(legacy_kobj, &platform_profile_group);
+ 	if (err)
+ 		goto cleanup_cur;
+ 
+@@ -641,8 +643,8 @@ void platform_profile_remove(struct device *dev)
+ 	ida_free(&platform_profile_ida, pprof->minor);
+ 	device_unregister(&pprof->dev);
+ 
+-	sysfs_notify(acpi_kobj, NULL, "platform_profile");
+-	sysfs_update_group(acpi_kobj, &platform_profile_group);
++	sysfs_notify(legacy_kobj, NULL, "platform_profile");
++	sysfs_update_group(legacy_kobj, &platform_profile_group);
+ }
+ EXPORT_SYMBOL_GPL(platform_profile_remove);
+ 
+@@ -690,24 +692,38 @@ static int __init platform_profile_init(void)
+ {
+ 	int err;
+ 
+-	if (acpi_disabled)
+-		return -EOPNOTSUPP;
++	/*
++	 * On devicetree boots (acpi_disabled) there is no acpi_kobj. Keep the class
++	 * interface and provide the legacy /sys/firmware/acpi/platform_profile file on our
++	 * own kobject, because power-profiles-daemon only reads the legacy file.
++	 */
++	legacy_kobj = acpi_disabled ? NULL : acpi_kobj;
++	if (!legacy_kobj) {
++		legacy_kobj = kobject_create_and_add("acpi", firmware_kobj);
++		if (!legacy_kobj)
++			return -ENOMEM;
++		own_legacy_kobj = true;
++	}
+ 
+ 	err = class_register(&platform_profile_class);
+ 	if (err)
+ 		return err;
+ 
+-	err = sysfs_create_group(acpi_kobj, &platform_profile_group);
++	err = sysfs_create_group(legacy_kobj, &platform_profile_group);
+ 	if (err)
+ 		class_unregister(&platform_profile_class);
++	if (err && own_legacy_kobj)
++		kobject_put(legacy_kobj);
+ 
+ 	return err;
+ }
+ 
+ static void __exit platform_profile_exit(void)
+ {
+-	sysfs_remove_group(acpi_kobj, &platform_profile_group);
++	sysfs_remove_group(legacy_kobj, &platform_profile_group);
+ 	class_unregister(&platform_profile_class);
++	if (own_legacy_kobj)
++		kobject_put(legacy_kobj);
+ }
+ module_init(platform_profile_init);
+ module_exit(platform_profile_exit);
+diff --git a/drivers/cpufreq/scmi-cpufreq.c b/drivers/cpufreq/scmi-cpufreq.c
+index 4edb4f7a8aa97b..846f8a74cdd3d9 100644
+--- a/drivers/cpufreq/scmi-cpufreq.c
++++ b/drivers/cpufreq/scmi-cpufreq.c
+@@ -195,6 +195,29 @@ static int scmi_limit_notify_cb(struct notifier_block *nb, unsigned long event,
+ 	return NOTIFY_OK;
+ }
+ 
++/*
++ * Some firmware (seen on the Surface Pro 11, X1P64100) reports a sustained
++ * frequency of 0 for a performance domain, so the SCMI perf protocol flags
++ * every OPP of that domain as turbo. With boost disabled the cpufreq core
++ * then finds no usable frequency and rejects the policy (-EINVAL), leaving
++ * the whole cluster without DVFS. A table made only of boost entries carries
++ * no information, so treat its entries as regular frequencies.
++ */
++static void scmi_cpufreq_fixup_all_boost(struct device *cpu_dev,
++					 struct cpufreq_frequency_table *table)
++{
++	struct cpufreq_frequency_table *pos;
++
++	cpufreq_for_each_valid_entry(pos, table)
++		if (!(pos->flags & CPUFREQ_BOOST_FREQ))
++			return;
++
++	cpufreq_for_each_valid_entry(pos, table)
++		pos->flags &= ~CPUFREQ_BOOST_FREQ;
++
++	dev_info(cpu_dev, "all OPPs flagged as turbo by firmware, using them as regular OPPs\n");
++}
++
+ static int scmi_cpufreq_init(struct cpufreq_policy *policy)
+ {
+ 	int ret, nr_opp, domain;
+@@ -284,6 +307,8 @@ static int scmi_cpufreq_init(struct cpufreq_policy *policy)
+ 		goto out_free_opp;
+ 	}
+ 
++	scmi_cpufreq_fixup_all_boost(cpu_dev, freq_table);
++
+ 	priv->cpu_dev = cpu_dev;
+ 	priv->domain_id = domain;
+ 

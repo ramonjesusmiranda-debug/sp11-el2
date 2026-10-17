@@ -1,0 +1,5 @@
+/dts-v1/;
+/plugin/;
+/* EL2 (17-10-2026): CL5 cuelga CPUs en uso normal (cuelgues 10-30 s tras arrancar; maz recomienda quitarlo), pero sin
+ * CL5 no hay DRIPS en s2idle (2,5 W). Se deja CL5 solo para la suspensión, como DRIPS (parche 03 system-sleep-only). */
+&cluster_cl5 { system-sleep-only; };

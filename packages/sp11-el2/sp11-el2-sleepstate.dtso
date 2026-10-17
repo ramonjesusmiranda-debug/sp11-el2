@@ -1,0 +1,17 @@
+/dts-v1/;
+/plugin/;
+/* Bit «sleepstate» de SMP2P hacia el ADSP, como hace Windows (qcsubsys): 0x1000 despierto, 0 en Modern Standby.
+ * Lo maneja asus_adsp_sleepstate (x1e-sleep). 16-10-2026 */
+&{/smp2p-adsp} {
+	smp2p_adsp_sleepstate_out: sleepstate-out {
+		qcom,entry-name = "sleepstate";
+		#qcom,smem-state-cells = <1>;
+	};
+};
+&{/} {
+	adsp-sleepstate {
+		compatible = "asus,adsp-sleepstate";
+		qcom,smem-states = <&smp2p_adsp_sleepstate_out 0>;
+		qcom,smem-state-names = "sleepstate";
+	};
+};

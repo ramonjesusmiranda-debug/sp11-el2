@@ -1,0 +1,142 @@
+From: Claude (CT108) <claude@ct108>
+Subject: drm/msm/dp: PSR with a software VSC SDP for sinks that need link training on exit
+
+Surface Pro 11 OLED (Samsung SDC, DP_PSR_SUPPORT 0x03, DP_PSR_CAPS 0x3a) on X1E80100 (DP controller 1.4.1). With
+msm.psr_enabled=1 the stock PSR1 sequence flickers and goes black: the main link is turned off although the sink
+needs training on exit, and the sink never reacts to the hardware VSC generator. For such sinks keep the main link
+active with the idle pattern and send the PSR VSC SDP (revision 2, DB0 bit 0 = active) from GENERIC0.
+Also wait for PSR_UPDATE_INT instead of the first PSR irq (PSR_CAPTURE_INT arrives ~10 ms earlier on DP 1.4), and
+make psr_enabled writable at runtime. Measured: 4.52 W with PSR vs 5.17 W without (idle desktop, 120 Hz).
+
+--- a/drivers/gpu/drm/msm/dp/dp_ctrl.c
++++ b/drivers/gpu/drm/msm/dp/dp_ctrl.c
+@@ -24,6 +24,7 @@
+ #include "dp_reg.h"
+ #include "dp_ctrl.h"
+ #include "dp_link.h"
++#include "dp_utils.h"
+ 
+ #define POLLING_SLEEP_US			1000
+ #define POLLING_TIMEOUT_US			10000
+@@ -1846,6 +1847,35 @@
+ 	msm_dp_write_link(ctrl, REG_PSR_CMD, cmd);
+ }
+ 
++/*
++ * Sinks that need link training on PSR exit (no DP_PSR_NO_TRAIN_ON_EXIT, e.g. the Surface Pro 11 OLED panel) are
++ * driven with the main link kept active. On the X1E80100 DP controller (v1.4.1) the sink never takes the PSR state
++ * from the hardware VSC generator, so the PSR VSC SDP (revision 2) is sent from GENERIC0 instead.
++ */
++static bool msm_dp_ctrl_psr_link_active(struct msm_dp_ctrl_private *ctrl)
++{
++	return !(ctrl->panel->psr_cap.capabilities & DP_PSR_NO_TRAIN_ON_EXIT);
++}
++
++static void msm_dp_ctrl_psr_sw_vsc(struct msm_dp_ctrl_private *ctrl, bool active)
++{
++	struct dp_sdp_header h = { .HB0 = 0x00, .HB1 = DP_SDP_VSC, .HB2 = 0x02, .HB3 = 0x08 };
++	u32 hdr[2], cfg;
++	int i;
++
++	msm_dp_utils_pack_sdp_header(&h, hdr);
++	msm_dp_write_link(ctrl, MMSS_DP_GENERIC0_0, hdr[0]);
++	msm_dp_write_link(ctrl, MMSS_DP_GENERIC0_1, hdr[1]);
++	msm_dp_write_link(ctrl, MMSS_DP_GENERIC0_2, active ? 0x01 : 0x00);
++	for (i = 1; i < 8; i++)
++		msm_dp_write_link(ctrl, MMSS_DP_GENERIC0_2 + 4 * i, 0);
++	cfg = msm_dp_read_link(ctrl, MMSS_DP_SDP_CFG);
++	msm_dp_write_link(ctrl, MMSS_DP_SDP_CFG, cfg | GEN0_SDP_EN);
++	cfg = msm_dp_read_link(ctrl, MMSS_DP_SDP_CFG2);
++	msm_dp_write_link(ctrl, MMSS_DP_SDP_CFG2, cfg | GENERIC0_SDPSIZE_VALID);
++	msm_dp_ctrl_enable_sdp(ctrl);
++}
++
+ void msm_dp_ctrl_config_psr(struct msm_dp_ctrl *msm_dp_ctrl)
+ {
+ 	struct msm_dp_ctrl_private *ctrl = container_of(msm_dp_ctrl,
+@@ -1864,6 +1894,15 @@
+ 	msm_dp_ctrl_enable_sdp(ctrl);
+ 
+ 	cfg = DP_PSR_ENABLE;
++	if (msm_dp_ctrl_psr_link_active(ctrl)) {
++		u32 config = msm_dp_read_link(ctrl, REG_DP_CONFIGURATION_CTRL);
++
++		msm_dp_write_link(ctrl, REG_DP_CONFIGURATION_CTRL, config & ~DP_CONFIGURATION_CTRL_SEND_VSC);
++		msm_dp_ctrl_psr_sw_vsc(ctrl, false);
++		cfg |= DP_PSR_MAIN_LINK_ACTIVE;
++	}
++	drm_info_once(ctrl->drm_dev, "PSR1: sink caps 0x%x, %s\n", ctrl->panel->psr_cap.capabilities,
++		      msm_dp_ctrl_psr_link_active(ctrl) ? "main link kept active, software VSC" : "main link off");
+ 	drm_dp_dpcd_write(ctrl->aux, DP_PSR_EN_CFG, &cfg, 1);
+ }
+ 
+@@ -1885,6 +1924,20 @@
+ 	 * 1. Enable the mainlink
+ 	 * 2. Send the PSR exit SDP
+ 	 */
++	if (msm_dp_ctrl_psr_link_active(ctrl)) {
++		if (enter) {
++			msm_dp_ctrl_psr_sw_vsc(ctrl, true);
++			msleep(20);	/* let the sink see the PSR state for a couple of frames */
++			msm_dp_ctrl_push_idle(msm_dp_ctrl);
++		} else {
++			msm_dp_write_link(ctrl, REG_DP_STATE_CTRL, DP_STATE_CTRL_SEND_VIDEO);
++			msm_dp_ctrl_wait4video_ready(ctrl);
++			msm_dp_write_link(ctrl, REG_DP_STATE_CTRL, 0);
++			msm_dp_ctrl_psr_sw_vsc(ctrl, false);
++		}
++		return;
++	}
++
+ 	if (enter) {
+ 		reinit_completion(&ctrl->psr_op_comp);
+ 		msm_dp_ctrl_psr_enter(ctrl);
+@@ -2619,7 +2672,8 @@
+ 	if (ctrl->panel->psr_cap.version) {
+ 		isr = msm_dp_ctrl_get_psr_interrupt(ctrl);
+ 
+-		if (isr)
++		/* PSR_CAPTURE_INT comes before the entry is done (seen on DP v1.4): wait for the update or an error */
++		if (isr & (PSR_UPDATE_INT | PSR_EXIT_INT | PSR_UPDATE_ERROR_INT | PSR_WAKE_ERROR_INT))
+ 			complete(&ctrl->psr_op_comp);
+ 
+ 		if (isr & PSR_EXIT_INT)
+--- a/drivers/gpu/drm/msm/dp/dp_display.c
++++ b/drivers/gpu/drm/msm/dp/dp_display.c
+@@ -29,8 +29,13 @@
+ #include "dp_debug.h"
+ 
+ static bool psr_enabled = false;
+-module_param(psr_enabled, bool, 0);
+-MODULE_PARM_DESC(psr_enabled, "enable PSR for eDP and DP displays");
++module_param(psr_enabled, bool, 0644);
++MODULE_PARM_DESC(psr_enabled, "enable PSR for eDP and DP displays (set at boot; clearing it later stops new entries)");
++
++bool msm_dp_psr_runtime_enabled(void)
++{
++	return psr_enabled;
++}
+ 
+ #define HPD_STRING_SIZE 30
+ 
+--- a/drivers/gpu/drm/msm/dp/dp_display.h
++++ b/drivers/gpu/drm/msm/dp/dp_display.h
+@@ -27,6 +27,7 @@
+ };
+ 
+ int msm_dp_display_get_modes(struct msm_dp *msm_dp_display);
++bool msm_dp_psr_runtime_enabled(void);
+ bool msm_dp_display_check_video_test(struct msm_dp *msm_dp_display);
+ int msm_dp_display_get_test_bpp(struct msm_dp *msm_dp_display);
+ void msm_dp_display_signal_audio_start(struct msm_dp *msm_dp_display);
+--- a/drivers/gpu/drm/msm/dp/dp_drm.c
++++ b/drivers/gpu/drm/msm/dp/dp_drm.c
+@@ -79,7 +79,7 @@
+ 	if (WARN_ON(!conn_state))
+ 		return -ENODEV;
+ 
+-	conn_state->self_refresh_aware = dp->psr_supported;
++	conn_state->self_refresh_aware = dp->psr_supported && msm_dp_psr_runtime_enabled();
+ 
+ 	if (!conn_state->crtc || !crtc_state)
+ 		return 0;

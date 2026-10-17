@@ -1,0 +1,4 @@
+/dts-v1/;
+/plugin/;
+/* Fase 2 de EL2 en la Surface Pro 11: ADSP enganchado (lo deja arrancado la UEFI); CDSP fuera. 16-10-2026 */
+&remoteproc_cdsp { status = "disabled"; };
