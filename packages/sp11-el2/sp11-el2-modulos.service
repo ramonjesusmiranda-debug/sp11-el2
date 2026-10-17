@@ -1,10 +1,12 @@
 [Unit]
-Description=Surface Pro 11 en EL2: módulos de reposo (AOSD bloqueado, Modern Standby al ADSP)
+Description=Surface Pro 11 en EL2: aviso de Modern Standby al ADSP
 ConditionKernelVersion=*sp11-el2*
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/modprobe aoss_cxsd_only
+# AOSD permitido desde el 17-10-2026: con el parche 140 (wsa/va sueltan sus votos LPASS) y los temporizadores
+# aparcados, cxsd+aosd+DDR el 99,9 % de 73 min sin el reinicio horario. aoss_cxsd_only queda en el paquete DKMS
+# por si hiciera falta volver a bloquear AOSD: «modprobe aoss_cxsd_only».
 ExecStart=/usr/bin/modprobe qcom_adsp_pwr_lmts
 RemainAfterExit=yes
 

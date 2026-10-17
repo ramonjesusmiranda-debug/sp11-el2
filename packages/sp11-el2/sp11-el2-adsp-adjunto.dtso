@@ -1,0 +1,8 @@
+/dts-v1/;
+/plugin/;
+/* Imagen EL2 de diario (17-10-2026): el ADSP que deja arrancado la UEFI se «engancha» con el driver PAS (batería,
+ * Modern Standby), como antes de los parches x1e-dsp, que lo paran y lo arrancan desde Linux (solo en el2-dsp.efi). */
+&remoteproc_adsp {
+	compatible = "qcom,x1e80100-adsp-pas";
+	qcom,broken-reset;
+};

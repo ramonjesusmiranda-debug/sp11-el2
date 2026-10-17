@@ -83,9 +83,22 @@ source=(
   "125-cpuidle-psci-deep-off.patch"
   "126-arch-timer-park-stopped-timers.patch"
   "127-ddr-votos-suspension-bwmon-pcie.patch"
+  "128-tzmem-shm-bridge-self-owner-el2.patch"
+  "129-x1-el2-dma40-iris-shm-bridge.patch"
+  "130-x1e-dsp-0003-pmic-glink-defer.patch"
+  "131-x1e-dsp-0004-dt-bindings-pdc-reset.patch"
+  "132-x1e-dsp-0005-dt-bindings-aoss-reset.patch"
+  "133-x1e-dsp-0006-dt-bindings-tcsr-halt.patch"
+  "134-x1e-dsp-0007-dt-bindings-remoteproc.patch"
+  "135-x1e-dsp-0008-reset-qcom-pdc.patch"
+  "136-x1e-dsp-0009-reset-qcom-aoss.patch"
+  "137-x1e-dsp-0010-adsp-cdsp-el2-sp11.patch"
+  "138-x1e-dsp-0011-hamoa-resets-tcsr-halt.patch"
+  "139-x1e-dsp-0012-x1-el2-dsps-sp11.patch"
+  "140-lpass-wsa-va-macro-release-votes.patch"
 )
 source_aarch64=(config.aarch64)
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 sha256sums_aarch64=('96e7b20fd17908a71c5bc2cd3e4abe52f7b0d91658f2f3b8c333c1c93c7dfe26')
 
 export KBUILD_BUILD_HOST=archlinux
