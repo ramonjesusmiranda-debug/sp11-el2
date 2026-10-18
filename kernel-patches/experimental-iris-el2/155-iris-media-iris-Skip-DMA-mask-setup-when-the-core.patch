@@ -1,0 +1,54 @@
+# Iris EL2: «media: iris: Migrate iommus to iris sub nodes» v5 (Vikash Garodia, 2026-09-26, https://patch.msgid.link/20260926-vpu_iommu_iova_handling-v5-0-0322ca5dc10c@oss.qualcomm.com)
+Subject: [PATCH v5 7/13] media: iris: Skip DMA mask setup when the core
+ device has no IOMMU
+From: Vikash Garodia <vikash.garodia@oss.qualcomm.com>
+Date: Sat, 26 Sep 2026 12:04:06 +0530
+Message-Id: <20260926-vpu_iommu_iova_handling-v5-7-0322ca5dc10c@oss.qualcomm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+Once the streams are described as context bank subnodes, the "iommus"
+property no longer sits on the parent iris node. That device then has no
+IOMMU domain of its own and never performs DMA directly, so calling
+dma_set_mask_and_coherent() on it is meaningless, and on a device with no
+IOMMU it can fail and abort probe.
+
+Set the DMA mask only when device_iommu_mapped() reports an IOMMU on the
+core device. Platforms that have not been converted still carry "iommus"
+on the parent node and keep the existing setup. For converted platforms
+the mask is applied to each context bank device instead, in
+iris_create_cb_dev().
+
+Reviewed-by: Dmitry Baryshkov <dmitry.baryshkov@oss.qualcomm.com>
+Co-developed-by: Vishnu Reddy <busanna.reddy@oss.qualcomm.com>
+Signed-off-by: Vishnu Reddy <busanna.reddy@oss.qualcomm.com>
+Signed-off-by: Vikash Garodia <vikash.garodia@oss.qualcomm.com>
+Tested-by: Daniel J Blueman <daniel@quora.org>
+---
+ drivers/media/platform/qcom/iris/iris_probe.c | 8 +++++---
+ 1 file changed, 5 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/iris/iris_probe.c b/drivers/media/platform/qcom/iris/iris_probe.c
+index debd1f0e57038d7abf463e82fd80f887b67750e8..4bdb078d83b5c331869dab2409bc4d10ab302737 100644
+--- a/drivers/media/platform/qcom/iris/iris_probe.c
++++ b/drivers/media/platform/qcom/iris/iris_probe.c
+@@ -352,9 +352,11 @@ static int iris_probe(struct platform_device *pdev)
+ 
+ 	dma_mask = core->iris_platform_data->dma_mask;
+ 
+-	ret = dma_set_mask_and_coherent(dev, dma_mask);
+-	if (ret)
+-		goto err_vdev_unreg_enc;
++	if (device_iommu_mapped(dev)) {
++		ret = dma_set_mask_and_coherent(dev, dma_mask);
++		if (ret)
++			goto err_vdev_unreg_enc;
++	}
+ 
+ 	dma_set_max_seg_size(&pdev->dev, DMA_BIT_MASK(32));
+ 	dma_set_seg_boundary(&pdev->dev, DMA_BIT_MASK(32));
+
+-- 
+2.34.1
+

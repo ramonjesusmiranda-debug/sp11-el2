@@ -1,0 +1,92 @@
+# Iris EL2: «media: iris: Migrate iommus to iris sub nodes» v5 (Vikash Garodia, 2026-09-26, https://patch.msgid.link/20260926-vpu_iommu_iova_handling-v5-0-0322ca5dc10c@oss.qualcomm.com)
+Subject: [PATCH v5 8/13] arm64: dts: qcom: hamoa: Add Iris context bank
+ subnodes
+From: Vikash Garodia <vikash.garodia@oss.qualcomm.com>
+Date: Sat, 26 Sep 2026 12:04:07 +0530
+Message-Id: <20260926-vpu_iommu_iova_handling-v5-8-0322ca5dc10c@oss.qualcomm.com>
+MIME-Version: 1.0
+Content-Type: text/plain; charset="utf-8"
+Content-Transfer-Encoding: 7bit
+
+The VPU issues DMA through several SMMU streams, and the hardware does
+not give every stream the same addressable range. The non-pixel stream
+cannot address the low 600MB of IOVA space, while the pixel stream can
+address the full range:
+    +-----------------------------------------------------------+
+    | non-pixel stream addressable range (600 MB - 3.5 GB)      |
+    | 0x25800000 - 0xe0000000                                   |
+    +-----------------------------------------------------------+
+    | pixel stream addressable range (0 - 3.5 GB)               |
+    | 0x00000000 - 0xe0000000                                   |
+    +-----------------------------------------------------------+
+A single "iommus" property on the video-codec node puts every stream in
+one IOMMU domain sharing one IOVA allocator, so nothing restricts a
+non-pixel buffer to avoid 0 to 600MB. Once an allocation lands below
+that boundary the hardware faults, which shows up as unhandled SMMU page
+faults and spontaneous reboots:
+https://gitlab.freedesktop.org/drm/msm/-/work_items/100
+
+Given that the address range restriction is for specific VPU stream, it
+should be ideally be moved to that stream. To achieve the same, a subset
+of streams is now represented as subnodes, so that each can be
+associated with its respective addressable range. The design was discussed
+and agreed by mainatiners here
+https://lore.kernel.org/all/c7b956a9-d3e8-4e18-b780-5d08f5cd2ca1@kernel.org
+
+In the past, this limitation was addressed with an iommu-map approach,
+with the iris driver dynamically creating the devices. That approach
+was later concluded to be a hack to avoid having subnodes, and was NAKed
+by the iommu maintainers. It was discussed in detail here:
+https://lore.kernel.org/all/c7b956a9-d3e8-4e18-b780-5d08f5cd2ca1@kernel.org/
+
+The video-codec node includes address-cells, size-cells and dma-ranges
+to declare 1:1 mapping for DMA translation to the parent.
+
+Co-developed-by: Vishnu Reddy <busanna.reddy@oss.qualcomm.com>
+Signed-off-by: Vishnu Reddy <busanna.reddy@oss.qualcomm.com>
+Signed-off-by: Vikash Garodia <vikash.garodia@oss.qualcomm.com>
+Reviewed-by: Konrad Dybcio <konrad.dybcio@oss.qualcomm.com>
+Reviewed-by: Dmitry Baryshkov <dmitry.baryshkov@oss.qualcomm.com>
+---
+ arch/arm64/boot/dts/qcom/hamoa.dtsi | 15 +++++++++++++--
+ 1 file changed, 13 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/hamoa.dtsi b/arch/arm64/boot/dts/qcom/hamoa.dtsi
+index 4e35254cdd11a87eb5e4817abd09a603522309e2..9819a1f5686ce92c2249cc1dd65a491665fcfb94 100644
+--- a/arch/arm64/boot/dts/qcom/hamoa.dtsi
++++ b/arch/arm64/boot/dts/qcom/hamoa.dtsi
+@@ -5468,10 +5468,12 @@ &config_noc SLAVE_VENUS_CFG QCOM_ICC_TAG_ACTIVE_ONLY>,
+ 			resets = <&gcc GCC_VIDEO_AXI0_CLK_ARES>;
+ 			reset-names = "bus";
+ 
+-			iommus = <&apps_smmu 0x1940 0>,
+-				 <&apps_smmu 0x1947 0>;
+ 			dma-coherent;
+ 
++			#address-cells = <1>;
++			#size-cells = <1>;
++			dma-ranges = <0x0 0x0 0x0 0xe0000000>;
++
+ 			/*
+ 			 * IRIS firmware is signed by vendors, only
+ 			 * enable on boards where the proper signed firmware
+@@ -5479,6 +5481,15 @@ &config_noc SLAVE_VENUS_CFG QCOM_ICC_TAG_ACTIVE_ONLY>,
+ 			 */
+ 			status = "disabled";
+ 
++			non-pixel {
++				iommus = <&apps_smmu 0x1940 0x0>;
++				iommu-ranges = <0x25800000 0xba800000>;
++			};
++
++			pixel {
++				iommus = <&apps_smmu 0x1947 0x0>;
++			};
++
+ 			iris_opp_table: opp-table {
+ 				compatible = "operating-points-v2";
+ 
+
+-- 
+2.34.1
+

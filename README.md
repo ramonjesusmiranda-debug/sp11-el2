@@ -4,7 +4,7 @@ Arch Linux on a Surface Pro 11 booted at EL2 with [slbounce](https://github.com/
 stable, with the ADSP and CDSP started by Linux ([x1e-dsp](https://github.com/justririll/x1e-dsp)),
 working audio and RTC, and s2idle reaching **CXSD + AOSD + DDR LPM for 99.9 % of a 73 min suspend
 (~0.26 W, was 1.06 W at EL1)**, no hourly reset. Tested on one unit (X1E80100, OLED, UEFI 175.222.235),
-October 2026. Base kernel: [dwhinham/linux-sp11](https://github.com/dwhinham/linux-sp11) 7.2.8 (`616a9f2`).
+October 2026 (updated 18 October: memlat, findings 11-14). Base kernel: [dwhinham/linux-sp11](https://github.com/dwhinham/linux-sp11) 7.2.8 (`616a9f2`).
 Use at your own risk.
 
 | Setup | Audio | NPU | s2idle |
@@ -50,6 +50,27 @@ Use at your own risk.
    nvme-pci is built in (`quirks_param_set()` allocates during `parse_args`, before mm init).
 10. **PSR on the OLED panel** (patch 11): software PSR VSC SDP with the main link kept active: 4.5 W vs 5.2 W idle.
 
+11. **Memory bandwidth on X1E Linux needs memlat.** Without the CPUCP memory-latency governor the CPU never raises
+    DDR/LLCC: the `cpu-bwmon` instances stay at their lowest vote (4.8 GB/s) under full load. STREAM triad (12 threads):
+    **38 GB/s at EL2, 41 GB/s at EL1 (Gunyah)** — so not an EL2 issue. With the unmerged
+    "Qualcomm Generic Vendor Extensions" **RFC v8** (Pragnesh Papaniya / Sibi Sankar,
+    `20260724-rfc_v8_scmi_memlat-v1-0-cb732bcff1f4@oss.qualcomm.com`, patches 1-9 as 143-151) it reaches **67 GB/s**;
+    DDR/LLCC go back to 547/300 MHz at idle and s2idle is unaffected (CXSD + AOSD + DDR 99.9 % of an 880 s suspend).
+    Note: the protocol 0x80 module does not autoload here; `sp11-el2-modulos.service` modprobes it.
+    llama.cpp CPU (Q4_0): Qwen3-8B 7 → 21.4 t/s generation; Gemma 4 E4B QAT 28.4 t/s, 209 t/s prompt. A llama.cpp
+    build with the Vulkan backend makes the CPU path ~3x slower (weights in GPU-visible memory) — build CPU-only.
+12. **PSR WARN at boot** ("driver disabled vblank in self-refresh"): `dpu_crtc_disable()` only checked the old state,
+    so it switched vblank off when *entering* self refresh. Patch 142 skips `drm_crtc_vblank_off()` then.
+13. **CDSP crash ~33 s after boot** ("fatal error received: sleep_statsi.c:537", remoteproc recovers it, sleep
+    unaffected): 4/6 boots with the original x1e-dsp, 2/5 with the socinfo/CDSP DTB descriptor (141), 1/4 with the
+    SPMI windows (159). Not fixed; timing is the only constant (~30 s after the CDSP starts).
+14. **Iris (video) at EL2 does not work yet** (`kernel-patches/experimental-iris-el2/`, do not use as is): with
+    "media: iris: Migrate iommus to iris sub nodes" v5 (4-8) and "Enable Secure PAS support with IOMMU managed by
+    Linux" (glymur v11 2/9) ported to 7.2.8, the MS-signed `qcvss8380.mbn` authenticates via PAS, but
+    `qcom_scm_mem_protect_video_var` returns -EIO and the failed start left the SoC stalling (GMU/APM/DPU timeouts:
+    no desktop). Skipping CP (158) avoids the stall, but CTRL_STATUS stays 0 with no SMMU faults: the VPU never
+    starts. The generic `vpu30_p4` is rejected by TZ (-22).
+
 ## Contents
 
 - `kernel-patches/` — patches on top of linux-sp11 7.2.8 and the `PKGBUILD` used:
@@ -65,6 +86,11 @@ Use at your own risk.
   - `128`–`139`: [x1e-dsp](https://github.com/justririll/x1e-dsp) 0001–0012 (Kirill Mitrofanov; 0001–0002 from
     the jglathe tree); `137` and `139` merged on this tree and adapted to the 7.2.8 PAS API
   - `140`: LPASS wsa/va macros drop their votes in runtime suspend (this work)
+  - `141`: x1e-dsp b9dc5e8 (ADSP DTB identity from socinfo, CDSP DTB descriptor); `159`: x1e-dsp 59a8430 (SPMI windows)
+  - `142`: DPU keeps vblank on when entering self refresh (this work)
+  - `143`-`151`: Qualcomm Generic Vendor Extensions + SCMI memlat RFC v8 1-9/10 (unmerged; config
+    `QCOM_SCMI_GENERIC_EXT`, `DEVFREQ_GOV_REMOTE`, `SCMI_QCOM_MEMLAT_DEVFREQ` as modules)
+  - `experimental-iris-el2/`: 152-158, Iris at EL2 attempt (finding 14) — not in the PKGBUILD
 - `packages/sp11-el2` — builds `/boot/sl/el2-dsp.efi` (main: ADSP+CDSP by Linux) and `/boot/sl/el2.efi`
   (UEFI-left ADSP attached, no audio) from the kernel's EL2 DTB + overlays; systemd-boot entries through the UEFI
   shell (`*.nsh` find slbounce on fs0..fs9); sleep hook; module service; WirePlumber drop-in.

@@ -1,0 +1,70 @@
+# 159: x1e-dsp b9b3c84 + 59a8430 (justririll, 18-10-2026): SMEM/cmd-db por compatible y las 4 ventanas SPMI de solo lectura que da el QHEE del Surface UEFI 175.222.235 al CDSP
+diff --git a/drivers/remoteproc/qcom_q6v5_adsp.c b/drivers/remoteproc/qcom_q6v5_adsp.c
+index 4845b3b..2b87b08 100644
+--- a/drivers/remoteproc/qcom_q6v5_adsp.c
++++ b/drivers/remoteproc/qcom_q6v5_adsp.c
+@@ -592,8 +592,8 @@ static void x1e_unmap_carveout(struct rproc *rproc, phys_addr_t mem_phys, size_t
+ 
+ /* Identity-map shared regions a hypervisor would normally grant the DSP */
+ static const char * const pas_extra_regions[] = {
+-	"/reserved-memory/smem@ffe00000",
+-	"/reserved-memory/aop-cmd-db@81c60000",
++	"qcom,smem",
++	"qcom,cmd-db",
+ };
+ 
+ static int x1e_extra_resource(int i, struct resource *res)
+@@ -601,7 +601,7 @@ static int x1e_extra_resource(int i, struct resource *res)
+ 	struct device_node *np;
+ 	int ret;
+ 
+-	np = of_find_node_by_path(pas_extra_regions[i]);
++	np = of_find_compatible_node(NULL, NULL, pas_extra_regions[i]);
+ 	if (!np)
+ 		return -ENOENT;
+ 	ret = of_address_to_resource(np, 0, res);
+@@ -619,13 +619,19 @@ static void x1e_map_extra(struct qcom_adsp *pas, struct rproc *rproc, bool map)
+ 	for (i = 0; i < ARRAY_SIZE(pas_extra_regions); i++) {
+ 		if (map == !!(pas->extra_mapped & BIT(i)))
+ 			continue;
+-		if (x1e_extra_resource(i, &res))
++		if (x1e_extra_resource(i, &res)) {
++			if (map)
++				dev_warn(&rproc->dev, "no %s region to map for the DSP\n",
++					 pas_extra_regions[i]);
+ 			continue;
++		}
+ 		if (map) {
+ 			ret = iommu_map(rproc->domain, res.start, res.start, resource_size(&res),
+ 					IOMMU_READ | IOMMU_WRITE, GFP_KERNEL);
+-			dev_dbg(&rproc->dev, "extra map %pR: %d\n", &res, ret);
+-			if (!ret)
++			if (ret)
++				dev_warn(&rproc->dev, "failed to map %s %pR: %d\n",
++					 pas_extra_regions[i], &res, ret);
++			else
+ 				pas->extra_mapped |= BIT(i);
+ 		} else {
+ 			iommu_unmap(rproc->domain, res.start, resource_size(&res));
+@@ -635,7 +641,9 @@ static void x1e_map_extra(struct qcom_adsp *pas, struct rproc *rproc, bool map)
+ }
+ 
+ /*
+- * CDSP (VMID 0x1e) static apertures granted by QHEE .367 (table at ELF VA 0xccc08):
++ * CDSP (VMID 0x1e) static apertures granted by QHEE: the 103 of the ASUS .367 build
++ * (table at ELF VA 0xccc08) plus the four read-only SPMI windows that newer builds
++ * (Surface UEFI 175.222.235) add, 107 in all.
+  * {pa, size, perm}, perm bit2 = read, bit1 = write. Names come from the hardware
+  * region directory in the CDSP firmware. "(boot)" marks the entries the CDSP cannot
+  * boot without (bisected on hardware); the others are used at run time, e.g. the
+@@ -745,6 +753,10 @@ static const struct { u64 pa; u64 size; u32 perm; } qhee_cdsp_map[] = {
+ 	{ 0x26221000, 0x1000, 0x4 },	/* 100 LLCC_BROADCAST_ANDTRP */
+ 	{ 0x320cc000, 0x3000, 0x6 },	/* 101 NSP NoC */
+ 	{ 0x322fa000, 0x1000, 0x6 },	/* 102 TURING_VAPSS_NOC_VAPSS_NOC_VAPSS_NOC */
++	{ 0x0c42c000, 0x5000, 0x4 },	/* 103 SPMI0_SPMI_CFG_TOP */
++	{ 0x0c431000, 0x5000, 0x4 },	/* 104 SPMI1_SPMI_CFG_TOP */
++	{ 0x0c4c0000, 0x10000, 0x4 },	/* 105 SPMI0_SPMI_PIC_OWNER */
++	{ 0x0c4d0000, 0x10000, 0x4 },	/* 106 SPMI1_SPMI_PIC_OWNER */
+ };
+ 
+ static_assert(ARRAY_SIZE(qhee_cdsp_map) <= QHEE_CDSP_MAP_MAX);

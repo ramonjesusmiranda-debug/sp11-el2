@@ -3,7 +3,7 @@
 # consigue CXSD y DDR LPM (~0,28 W). Requiere slbounce.efi y tcblaunch.exe en /boot/sl (no se redistribuyen). 17-10-2026
 pkgname=sp11-el2
 pkgver=2026.10.17
-pkgrel=5
+pkgrel=7
 pkgdesc="Surface Pro 11: arranque EL2 (slbounce) con reposo profundo"
 arch=("any")
 license=("GPL-2.0-only")

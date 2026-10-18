@@ -1,5 +1,5 @@
 [Unit]
-Description=Surface Pro 11 en EL2: aviso de Modern Standby al ADSP
+Description=Surface Pro 11 en EL2: aviso de Modern Standby al ADSP y memlat (escalado de DDR/LLCC por el CPUCP)
 ConditionKernelVersion=*sp11-el2*
 
 [Service]
@@ -8,6 +8,10 @@ Type=oneshot
 # aparcados, cxsd+aosd+DDR el 99,9 % de 73 min sin el reinicio horario. aoss_cxsd_only queda en el paquete DKMS
 # por si hiciera falta volver a bloquear AOSD: «modprobe aoss_cxsd_only».
 ExecStart=/usr/bin/modprobe qcom_adsp_pwr_lmts
+# 18-10-2026: memlat por SCMI (parches 143-151, RFC v8): sin él la CPU no sube DDR/LLCC y la memoria se queda en ~38 GB/s
+# (con él 67 GB/s; 8B Q4_0 en CPU 7 -> 10,9 t/s). El protocolo 0x80 no se autocarga: se carga aquí.
+ExecStart=/usr/bin/modprobe qcom-generic-ext
+ExecStart=/usr/bin/modprobe scmi-qcom-memlat-devfreq
 RemainAfterExit=yes
 
 [Install]

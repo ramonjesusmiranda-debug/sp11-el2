@@ -14,7 +14,7 @@
 
 pkgbase=linux-sp11-el2
 pkgver=7.2.8.arch1
-pkgrel=3
+pkgrel=8
 pkgdesc='Surface Pro 11 Linux EXPERIMENTAL para arrancar en EL2 (slbounce): reposo + enganche a DSP ya arrancados'
 url='https://github.com/dwhinham/linux-sp11'
 _commit=616a9f22113e7dc96e558b4426424ea1d7511092
@@ -96,9 +96,21 @@ source=(
   "138-x1e-dsp-0011-hamoa-resets-tcsr-halt.patch"
   "139-x1e-dsp-0012-x1-el2-dsps-sp11.patch"
   "140-lpass-wsa-va-macro-release-votes.patch"
+  "141-x1e-dsp-socinfo-cdsp-dtb-desc.patch"
+  "142-dpu-keep-vblank-entering-self-refresh.patch"
+  "143-memlat-firmware-arm-scmi-Add-SCMI-QCOM-Generic.patch"
+  "144-memlat-dt-bindings-firmware-arm-scmi-Add-Qualcomm.patch"
+  "145-memlat-firmware-arm-scmi-vendors-Add-QCOM-SCMI.patch"
+  "146-memlat-PM-devfreq-Add-new-target-freq-attribute-flag.patch"
+  "147-memlat-PM-devfreq-Add-new-track-remote-flag-for.patch"
+  "148-memlat-PM-devfreq-Add-a-governor-for-tracking-remote.patch"
+  "149-memlat-PM-devfreq-Introduce-the-QCOM-SCMI-Memlat.patch"
+  "150-memlat-arm64-dts-qcom-glymur-Enable-LLCC-DDR-DDR-QOS.patch"
+  "151-memlat-arm64-dts-qcom-hamoa-Enable-LLCC-DDR-DDR-QOS.patch"
+  "159-x1e-dsp-cdsp-spmi-windows.patch"
 )
 source_aarch64=(config.aarch64)
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 sha256sums_aarch64=('96e7b20fd17908a71c5bc2cd3e4abe52f7b0d91658f2f3b8c333c1c93c7dfe26')
 
 export KBUILD_BUILD_HOST=archlinux
