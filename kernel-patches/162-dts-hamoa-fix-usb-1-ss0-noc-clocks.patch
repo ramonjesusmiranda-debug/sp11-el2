@@ -1,0 +1,48 @@
+From a0a346e1a1453b5e7027bea14d18941967cf2c72 Mon Sep 17 00:00:00 2001
+From: Anthony Ruhier <aruhier@mailbox.org>
+Date: Tue, 20 Oct 2026 23:52:08 +0200
+Subject: [PATCH] arm64: dts: qcom: hamoa: fix the aggre NoC clocks of
+ usb_1_ss0
+
+All the USB controllers DMA through the USB aggregate NoC, and all of
+them but usb_1_ss0 hold GCC_AGGRE_NOC_USB_NORTH_AXI_CLK and
+GCC_AGGRE_NOC_USB_SOUTH_AXI_CLK as "noc_aggr_north"/"noc_aggr_south".
+usb_1_ss0 lists GCC_CFG_NOC_USB_ANOC_NORTH_AHB_CLK and
+GCC_CFG_NOC_USB_ANOC_SOUTH_AHB_CLK under those names instead.
+
+As long as another USB controller is active, the AXI clocks are on and
+nothing shows. Once the others are runtime suspended, they are gated
+while usb_1_ss0 is running: its registers are still reachable, but its
+DMA stalls. On a Lenovo Yoga Slim 7x, plugging a keyboard into the
+usb_1_ss0 port with the other controllers suspended left the xHC unable
+to post the port change event or complete Enable Slot:
+
+  xhci-hcd xhci-hcd.1.auto: Abort failed to stop command ring: -110
+  xhci-hcd xhci-hcd.1.auto: xHCI host controller not responding, assume dead
+
+Resuming another controller turned the clocks back on, and the stalled
+write from usb_1_ss0 (SID 0x1420) completed at that moment.
+
+Use the same NoC clocks as the other controllers.
+
+Fixes: 4af46b7bd66f ("arm64: dts: qcom: x1e80100: Add USB nodes")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ arch/arm64/boot/dts/qcom/hamoa.dtsi | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/hamoa.dtsi b/arch/arm64/boot/dts/qcom/hamoa.dtsi
+index 416a4badad0b1..577463350beb8 100644
+--- a/arch/arm64/boot/dts/qcom/hamoa.dtsi
++++ b/arch/arm64/boot/dts/qcom/hamoa.dtsi
+@@ -5500,8 +5500,8 @@
+ 				 <&gcc GCC_USB30_PRIM_SLEEP_CLK>,
+ 				 <&gcc GCC_USB30_PRIM_MOCK_UTMI_CLK>,
+ 				 <&gcc GCC_AGGRE_USB_NOC_AXI_CLK>,
+-				 <&gcc GCC_CFG_NOC_USB_ANOC_NORTH_AHB_CLK>,
+-				 <&gcc GCC_CFG_NOC_USB_ANOC_SOUTH_AHB_CLK>,
++				 <&gcc GCC_AGGRE_NOC_USB_NORTH_AXI_CLK>,
++				 <&gcc GCC_AGGRE_NOC_USB_SOUTH_AXI_CLK>,
+ 				 <&gcc GCC_SYS_NOC_USB_AXI_CLK>;
+ 			clock-names = "cfg_noc",
+ 				      "core",

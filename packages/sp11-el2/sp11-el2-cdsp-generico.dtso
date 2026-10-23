@@ -1,0 +1,7 @@
+/dts-v1/;
+/plugin/;
+/* PRUEBA: firmware genérico del CDSP de linux-firmware (CDSP.HT.2.9.c1-00094) en vez del de Microsoft
+ * (c1-00046.1), por si quita el cuelgue «sleep_statsi.c:537» a ~33 s del arranque. Idea de mmediouni. 19-10-2026 */
+&remoteproc_cdsp {
+	firmware-name = "qcom/x1e80100/cdsp.mbn", "qcom/x1e80100/cdsp_dtb.mbn";
+};

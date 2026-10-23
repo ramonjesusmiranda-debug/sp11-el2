@@ -1,0 +1,42 @@
+# nvme: nvme.quirks= en la línea de comandos cuelga el arranque con nvme-pci built-in
+# Propuesto por Maurizio Lombardi (linux-nvme, 19-10): module_param_cb -> device_param_cb.
+# Incluye typedefs __s128/__u128 en tools/include para asm/sigcontext.h en aarch64.
+--- a/drivers/nvme/host/pci.c
++++ b/drivers/nvme/host/pci.c
+@@ -243,7 +243,7 @@
+ 	.string = quirks_param,
+ };
+ 
+-module_param_cb(quirks, &quirks_param_ops, &quirks_param_string, 0444);
++device_param_cb(quirks, &quirks_param_ops, &quirks_param_string, 0444);
+ MODULE_PARM_DESC(quirks, "Enable/disable NVMe quirks by specifying "
+ 						"quirks=VID:DID:quirk_names");
+ 
+--- a/tools/include/uapi/linux/types.h
++++ b/tools/include/uapi/linux/types.h
+@@ -6,6 +6,11 @@
+ 
+ #ifndef __ASSEMBLER__
+ 
++#ifdef __SIZEOF_INT128__
++typedef __signed__ __int128 __s128 __attribute__((aligned(16)));
++typedef unsigned __int128 __u128 __attribute__((aligned(16)));
++#endif
++
+ /* copied from linux:include/uapi/linux/types.h */
+ #define __bitwise
+ typedef __u16 __bitwise __le16;
+--- a/tools/include/linux/types.h
++++ b/tools/include/linux/types.h
+@@ -13,6 +13,11 @@
+ #include <asm/types.h>
+ #include <asm/posix_types.h>
+ 
++#ifdef __SIZEOF_INT128__
++typedef __signed__ __int128 __s128 __attribute__((aligned(16)));
++typedef unsigned __int128 __u128 __attribute__((aligned(16)));
++#endif
++
+ struct page;
+ struct kmem_cache;
+ 

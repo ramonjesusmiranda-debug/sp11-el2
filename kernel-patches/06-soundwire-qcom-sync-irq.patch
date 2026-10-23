@@ -1,36 +1,43 @@
+From c10dec02b204a73d6e3d0638ee54a53227a92e2b Mon Sep 17 00:00:00 2001
 From: Oleg Keri <okerixx@gmail.com>
-Date: Wed, 7 Oct 2026 21:33:32 +0200
-Subject: [PATCH] soundwire: qcom: wait for the interrupt thread before gating the clock
+Date: Fri, 9 Oct 2026 10:26:39 +0200
+Subject: [PATCH] soundwire: qcom: disable the interrupt before gating the
+ clock
 
-A broadcast write returns as soon as the interrupt thread signals
-SPECIAL_CMD_ID_FINISHED, while the thread still has to clear and re-read
-the interrupt status. swrm_runtime_suspend() gates hclk right after the
-ClockStopNow broadcast, so those accesses race against the clock being
-removed; on x1e80100 and glymur hclk is the SoundWire clock itself. The
-next clock-stop exit then fails at random: bus clash, parity errors
-reported by the peripherals or AUTO_ENUM_FAILED, each leaving one side of
-the speakers detached until reboot.
+swrm_runtime_suspend() gates hclk straight after the ClockStopNow
+broadcast, while the interrupt thread that completed it is still
+clearing the status and CLK_STOP_FINISHED is about to fire. Both touch
+registers with the clock going away; on x1e80100 and glymur hclk is the
+SoundWire clock itself. The next clock-stop exit then fails at random
+(bus clash, parity errors, AUTO_ENUM_FAILED) and one side of the
+speakers stays detached until reboot.
 
-Wait for the interrupt thread to finish before gating the clock.
+Disable the interrupt before gating the clock and enable it again once
+the clock is back.
 
 Fixes: 74e79da9fd46 ("soundwire: qcom: add runtime pm support")
 Signed-off-by: Oleg Keri <okerixx@gmail.com>
-Link: https://lore.kernel.org/all/20261007193332.5270-1-okerixx@gmail.com/
 ---
- drivers/soundwire/qcom.c | 1 +
- 1 file changed, 1 insertion(+)
+ drivers/soundwire/qcom.c | 2 ++
+ 1 file changed, 2 insertions(+)
 
 diff --git a/drivers/soundwire/qcom.c b/drivers/soundwire/qcom.c
-index 6e0c5fb10efa..76f940f4eb31 100644
+index 55678a30cd4a1..c5e48e8a84429 100644
 --- a/drivers/soundwire/qcom.c
 +++ b/drivers/soundwire/qcom.c
-@@ -1887,6 +1887,7 @@ static int __maybe_unused swrm_runtime_suspend(struct device *dev)
+@@ -1730,6 +1730,7 @@ static int __maybe_unused swrm_runtime_resume(struct device *dev)
+ 	}
+ 
+ 	clk_prepare_enable(ctrl->hclk);
++	enable_irq(ctrl->irq);
+ 
+ 	if (ctrl->clock_stop_not_supported) {
+ 		reinit_completion(&ctrl->enumeration);
+@@ -1813,6 +1814,7 @@ static int __maybe_unused swrm_runtime_suspend(struct device *dev)
  		}
  	}
  
-+	synchronize_irq(ctrl->irq);
++	disable_irq(ctrl->irq);
  	clk_disable_unprepare(ctrl->hclk);
  
  	usleep_range(300, 305);
--- 
-2.55.0

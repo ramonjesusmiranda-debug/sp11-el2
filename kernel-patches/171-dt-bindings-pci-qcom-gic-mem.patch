@@ -1,0 +1,44 @@
+From 00ebbfbda6bc4d777fc5001c0df5421940250896 Mon Sep 17 00:00:00 2001
+From: Anthony Ruhier <aruhier@mailbox.org>
+Date: Wed, 21 Oct 2026 11:28:20 +0200
+Subject: [PATCH] dt-bindings: PCI: qcom: allow an optional gic-mem
+ interconnect path
+
+When the MSIs of a Qualcomm PCIe controller are routed to the GIC ITS
+through msi-map, every MSI becomes an LPI and the GIC fetches the LPI
+configuration and pending tables from DDR. The GIC reaches DDR through
+its own NoC port, which needs a bandwidth vote that holds in the RPMh
+sleep set, or the path can be collapsed while the APSS is in its
+deepest idle state and the next MSI cannot be delivered.
+
+Allow a third interconnect path, "gic-mem", to carry that vote.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../devicetree/bindings/pci/qcom,pcie-common.yaml         | 8 +++++++-
+ 1 file changed, 7 insertions(+), 1 deletion(-)
+
+diff --git a/Documentation/devicetree/bindings/pci/qcom,pcie-common.yaml b/Documentation/devicetree/bindings/pci/qcom,pcie-common.yaml
+index 77f8faf54737e..4dc618d39b6a5 100644
+--- a/Documentation/devicetree/bindings/pci/qcom,pcie-common.yaml
++++ b/Documentation/devicetree/bindings/pci/qcom,pcie-common.yaml
+@@ -42,12 +42,18 @@ properties:
+   dma-coherent: true
+ 
+   interconnects:
+-    maxItems: 2
++    minItems: 2
++    maxItems: 3
+ 
+   interconnect-names:
++    minItems: 2
+     items:
+       - const: pcie-mem
+       - const: cpu-pcie
++      - const: gic-mem
++        description:
++          Path from the GIC to memory, needed when the MSIs are delivered as
++          LPIs through the GIC ITS, which reads its tables from memory.
+ 
+   phys:
+     maxItems: 1

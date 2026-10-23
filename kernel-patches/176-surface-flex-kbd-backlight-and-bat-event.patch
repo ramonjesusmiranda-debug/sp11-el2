@@ -1,0 +1,186 @@
+# surface-hid / surface_battery: retroiluminación del teclado Surface Pro Flex (045E:09AE) y evento SAM BAT 0x1a
+--- a/drivers/hid/surface-hid/surface_hid_core.h
++++ b/drivers/hid/surface-hid/surface_hid_core.h
+@@ -11,8 +11,10 @@
+ #define SURFACE_HID_CORE_H
+ 
+ #include <linux/hid.h>
++#include <linux/leds.h>
+ #include <linux/pm.h>
+ #include <linux/types.h>
++#include <linux/workqueue.h>
+ 
+ #include <linux/surface_aggregator/controller.h>
+ #include <linux/surface_aggregator/device.h>
+@@ -67,6 +69,12 @@
+ 	struct hid_device *hid;
+ 
+ 	struct surface_hid_device_ops ops;
++
++	struct led_classdev kbd_bl_led;
++	struct work_struct kbd_bl_work;
++	u8 kbd_bl_levels[4];
++	u8 kbd_bl_cur;
++	bool has_kbd_bl;
+ };
+ 
+ int surface_hid_device_add(struct surface_hid_device *shid);
+--- a/drivers/hid/surface-hid/surface_hid.c
++++ b/drivers/hid/surface-hid/surface_hid.c
+@@ -161,6 +161,10 @@
+ 	if (event->command_id != 0x00)
+ 		return 0;
+ 
++	if (shid->has_kbd_bl && event->length >= 2 &&
++	    event->data[0] == 0xd5 && (event->data[1] & 0x01))
++		schedule_work(&shid->kbd_bl_work);
++
+ 	hid_input_report(shid->hid, HID_INPUT_REPORT, (u8 *)&event->data[0], event->length, 0);
+ 	return SSAM_NOTIF_HANDLED;
+ }
+--- a/drivers/hid/surface-hid/surface_hid_core.c
++++ b/drivers/hid/surface-hid/surface_hid_core.c
+@@ -184,6 +184,99 @@
+ };
+ 
+ 
++/* -- Keyboard backlight (Surface Pro Flex / Type Cover 045E:09AE). --------- */
++
++static u8 surface_kbd_bl_raw_to_idx(struct surface_hid_device *shid, u8 raw)
++{
++	u8 i;
++
++	for (i = 0; i < 4; i++) {
++		if (shid->kbd_bl_levels[i] >= raw)
++			return i;
++	}
++	return 3;
++}
++
++static enum led_brightness surface_kbd_bl_get(struct led_classdev *cdev)
++{
++	struct surface_hid_device *shid =
++		container_of(cdev, struct surface_hid_device, kbd_bl_led);
++	u8 buf[2] = { 0xd6, 0 };
++
++	if (surface_hid_is_hot_removed(shid))
++		return shid->kbd_bl_cur;
++
++	if (shid->ops.get_feature_report(shid, 0xd6, buf, sizeof(buf)) < 0)
++		return shid->kbd_bl_cur;
++
++	shid->kbd_bl_cur = surface_kbd_bl_raw_to_idx(shid, buf[1]);
++	return shid->kbd_bl_cur;
++}
++
++static int surface_kbd_bl_set(struct led_classdev *cdev, enum led_brightness value)
++{
++	struct surface_hid_device *shid =
++		container_of(cdev, struct surface_hid_device, kbd_bl_led);
++	u8 idx = clamp_t(u8, value, 0, 3);
++	u8 buf[2] = { 0xd5, shid->kbd_bl_levels[idx] };
++	int ret;
++
++	if (surface_hid_is_hot_removed(shid))
++		return -ENODEV;
++
++	ret = shid->ops.output_report(shid, 0xd5, buf, sizeof(buf));
++	if (ret < 0)
++		return ret;
++
++	shid->kbd_bl_cur = idx;
++	return 0;
++}
++
++static void surface_kbd_bl_work_fn(struct work_struct *work)
++{
++	struct surface_hid_device *shid =
++		container_of(work, struct surface_hid_device, kbd_bl_work);
++	u8 prev = shid->kbd_bl_cur;
++	u8 hw_idx = surface_kbd_bl_get(&shid->kbd_bl_led);
++
++	if (hw_idx == prev) {
++		u8 next = (prev + 1) % 4;
++
++		surface_kbd_bl_set(&shid->kbd_bl_led, next);
++	}
++
++	led_classdev_notify_brightness_hw_changed(&shid->kbd_bl_led, shid->kbd_bl_cur);
++}
++
++static void surface_hid_kbd_bl_init(struct surface_hid_device *shid)
++{
++	u8 feat[5] = { 0xd5, 0 };
++	u8 cur[2] = { 0xd6, 0 };
++
++	if (shid->hid->vendor != 0x045e || shid->hid->product != 0x09ae)
++		return;
++
++	if (shid->ops.get_feature_report(shid, 0xd5, feat, sizeof(feat)) < 0 ||
++	    feat[4] == 0)
++		return;
++
++	memcpy(shid->kbd_bl_levels, &feat[1], 4);
++	if (shid->ops.get_feature_report(shid, 0xd6, cur, sizeof(cur)) >= 0)
++		shid->kbd_bl_cur = surface_kbd_bl_raw_to_idx(shid, cur[1]);
++
++	INIT_WORK(&shid->kbd_bl_work, surface_kbd_bl_work_fn);
++	shid->kbd_bl_led.name = "surface::kbd_backlight";
++	shid->kbd_bl_led.max_brightness = 3;
++	shid->kbd_bl_led.flags = LED_BRIGHT_HW_CHANGED;
++	shid->kbd_bl_led.brightness_set_blocking = surface_kbd_bl_set;
++	shid->kbd_bl_led.brightness_get = surface_kbd_bl_get;
++	shid->kbd_bl_led.brightness = shid->kbd_bl_cur;
++
++	if (led_classdev_register(shid->dev, &shid->kbd_bl_led) == 0)
++		shid->has_kbd_bl = true;
++}
++
++
+ /* -- Common device setup. -------------------------------------------------- */
+ 
+ int surface_hid_device_add(struct surface_hid_device *shid)
+@@ -218,15 +311,23 @@
+ 	shid->hid->ll_driver = &surface_hid_ll_driver;
+ 
+ 	status = hid_add_device(shid->hid);
+-	if (status)
++	if (status) {
+ 		hid_destroy_device(shid->hid);
++		return status;
++	}
+ 
+-	return status;
++	surface_hid_kbd_bl_init(shid);
++	return 0;
+ }
+ EXPORT_SYMBOL_GPL(surface_hid_device_add);
+ 
+ void surface_hid_device_destroy(struct surface_hid_device *shid)
+ {
++	if (shid->has_kbd_bl) {
++		cancel_work_sync(&shid->kbd_bl_work);
++		led_classdev_unregister(&shid->kbd_bl_led);
++		shid->has_kbd_bl = false;
++	}
+ 	hid_destroy_device(shid->hid);
+ }
+ EXPORT_SYMBOL_GPL(surface_hid_device_destroy);
+--- a/drivers/power/supply/surface_battery.c
++++ b/drivers/power/supply/surface_battery.c
+@@ -26,6 +26,7 @@
+ 	SAM_EVENT_CID_BAT_BST         = 0x16,
+ 	SAM_EVENT_CID_BAT_ADP         = 0x17,
+ 	SAM_EVENT_CID_BAT_PROT        = 0x18,
++	SAM_EVENT_CID_BAT_0x1A        = 0x1a,
+ 	SAM_EVENT_CID_BAT_DPTF        = 0x53,
+ };
+ 
+@@ -368,6 +369,7 @@
+ 		break;
+ 
+ 	case SAM_EVENT_CID_BAT_PROT:
++	case SAM_EVENT_CID_BAT_0x1A:
+ 		/*
+ 		 * TODO: Implement support for battery protection status change
+ 		 *       event.

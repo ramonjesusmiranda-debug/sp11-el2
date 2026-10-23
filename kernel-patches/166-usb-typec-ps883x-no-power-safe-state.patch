@@ -1,0 +1,60 @@
+From c1875c4c7cc7bb919df5fd5f87bb3fada080bcaf Mon Sep 17 00:00:00 2001
+From: Anthony Ruhier <aruhier@mailbox.org>
+Date: Wed, 21 Oct 2026 23:26:09 +0200
+Subject: [PATCH] usb: typec: mux: ps883x: don't power the retimer up for the
+ safe state
+
+On Qualcomm laptops the retimer gets mode switches from two places:
+pmic_glink_altmode, and the Type-C class through the UCSI alternate
+modes. The class always passes the alternate mode in the retimer
+state, also when moving to the safe state on mode exit, and
+ps883x_set() takes any state with an alternate mode as a DisplayPort
+configuration.
+
+When a DisplayPort sink is unplugged, pmic_glink_altmode reports the
+orientation as none and the safe state, and the retimer is put in
+reset. The safe state from the class exiting the DisplayPort mode can
+come after that, and it powers the retimer back up and programs it as
+connected. Nothing follows, so the retimer stays powered with nothing
+plugged until the next connection on that port. On a Lenovo Yoga Slim
+7x (X1E80100) that is about 550 mW at idle.
+
+Seen with kprobes on ps883x_sw_set(), ps883x_retimer_set(),
+ps883x_enable_vregs() and ps883x_reset() after unplugging a monitor:
+
+  sw_set:   name="5-0008-switch" orient=0
+  rtmr_set: name="5-0008-retimer" alt=0x0 mode=0
+  reset:    name="5-0008-switch"
+  sw_set:   name="5-0008-switch" orient=0
+  rtmr_set: name="5-0008-retimer" alt=0xffff000d043dfc08 mode=0
+  vregs_on: name="5-0008-switch"
+
+The safe state never needs the retimer powered, so leave it in reset
+for that state. Any other mode still powers it up.
+
+Fixes: b38fa168a848 ("usb: typec: mux: ps883x: Power the retimer off when not in use")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/usb/typec/mux/ps883x.c | 9 +++++++++
+ 1 file changed, 9 insertions(+)
+
+diff --git a/drivers/usb/typec/mux/ps883x.c b/drivers/usb/typec/mux/ps883x.c
+index 64e0a61b776a1..0461718123389 100644
+--- a/drivers/usb/typec/mux/ps883x.c
++++ b/drivers/usb/typec/mux/ps883x.c
+@@ -196,6 +196,15 @@ static int ps883x_set(struct ps883x_retimer *retimer, struct typec_retimer_state
+ 	int cfg2 = 0x00;
+ 	bool reset = false;
+ 
++	/*
++	 * The safe state never needs the retimer powered. The Type-C class
++	 * sends it with the alternate mode still set when the mode is exited,
++	 * which can happen after a disconnect already put the retimer in
++	 * reset: don't take that as a DP configuration and power it back up.
++	 */
++	if (state->mode == TYPEC_STATE_SAFE && retimer->in_reset)
++		return 0;
++
+ 	if (retimer->orientation == TYPEC_ORIENTATION_REVERSE)
+ 		cfg0 |= CONN_STATUS_0_ORIENTATION_REVERSED;
+ 

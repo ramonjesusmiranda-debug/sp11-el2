@@ -1,0 +1,118 @@
+From 35445310eb4ba1aa7d7ea9db1f7b5d6dafc46fee Mon Sep 17 00:00:00 2001
+From: Anthony Ruhier <aruhier@mailbox.org>
+Date: Wed, 21 Oct 2026 12:43:26 +0200
+Subject: [PATCH] usb: xhci: debugfs: resume the controller before accessing
+ port registers
+
+The portsc and portli debugfs files read, and for compliance mode write,
+the port registers directly, even if the host controller is runtime
+suspended.
+
+The register set files had the same problem and were fixed by commit
+735baf1b2345 ("xhci: fix debugfs register accesses while suspended"):
+
+    Wire up the debugfs regset device pointer so that the controller is
+    resumed before accessing registers to avoid crashing or locking up
+    if it happens to be runtime suspended.
+
+but that only covers the files created through debugfs_regset32, not the
+per-port ones. The DWC3 debugfs files were fixed for the same reason by
+commit 614ce6a2ea50 ("usb: dwc3: debugfs: Resume dwc3 before accessing
+registers"), which explains why this matters:
+
+    When the dwc3 device is runtime suspended, various required clocks
+    are in disabled state and it is not guaranteed that access to any
+    registers would work. Depending on the SoC glue, a register read
+    could be as benign as returning 0 or be fatal enough to hang the
+    system.
+
+On a Lenovo Yoga Slim 7x (X1E80100) with runtime PM enabled on the
+DWC3 controllers, the SoC reset right after the portsc files were read
+while the controllers were runtime suspended.
+
+Take a runtime PM reference on the hcd's controller, the same device the
+register sets use, when a port file is opened and drop it on release,
+which covers both the reads and the compliance write. Ports that are not
+part of a roothub have no hcd to resume and are accessed as before.
+
+Fixes: 65475023928b ("xhci: debugfs: add usb ports to xhci debugfs")
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/usb/host/xhci-debugfs.c | 42 +++++++++++++++++++++++++++++----
+ 1 file changed, 38 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/usb/host/xhci-debugfs.c b/drivers/usb/host/xhci-debugfs.c
+index 2aa01d99f23df..694df8814487e 100644
+--- a/drivers/usb/host/xhci-debugfs.c
++++ b/drivers/usb/host/xhci-debugfs.c
+@@ -336,9 +336,43 @@ static int xhci_portsc_show(struct seq_file *s, void *unused)
+ 	return 0;
+ }
+ 
++/*
++ * Keep the host controller resumed while a port file is open, as its
++ * registers may not be accessible when it is runtime suspended. A port
++ * that is not part of a roothub has no hcd to resume.
++ */
++static int xhci_port_pm_open(struct inode *inode, struct file *file,
++			     int (*show)(struct seq_file *, void *))
++{
++	struct xhci_port *port = inode->i_private;
++	int ret;
++
++	if (port->rhub) {
++		ret = pm_runtime_resume_and_get(port->rhub->hcd->self.controller);
++		if (ret)
++			return ret;
++	}
++
++	ret = single_open(file, show, port);
++	if (ret && port->rhub)
++		pm_runtime_put(port->rhub->hcd->self.controller);
++
++	return ret;
++}
++
++static int xhci_port_release(struct inode *inode, struct file *file)
++{
++	struct xhci_port *port = inode->i_private;
++
++	if (port->rhub)
++		pm_runtime_put(port->rhub->hcd->self.controller);
++
++	return single_release(inode, file);
++}
++
+ static int xhci_port_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, xhci_portsc_show, inode->i_private);
++	return xhci_port_pm_open(inode, file, xhci_portsc_show);
+ }
+ 
+ static ssize_t xhci_port_write(struct file *file,  const char __user *ubuf,
+@@ -381,7 +415,7 @@ static const struct file_operations port_fops = {
+ 	.write                  = xhci_port_write,
+ 	.read			= seq_read,
+ 	.llseek			= seq_lseek,
+-	.release		= single_release,
++	.release		= xhci_port_release,
+ };
+ 
+ static int xhci_portli_show(struct seq_file *s, void *unused)
+@@ -415,14 +449,14 @@ static int xhci_portli_show(struct seq_file *s, void *unused)
+ 
+ static int xhci_portli_open(struct inode *inode, struct file *file)
+ {
+-	return single_open(file, xhci_portli_show, inode->i_private);
++	return xhci_port_pm_open(inode, file, xhci_portli_show);
+ }
+ 
+ static const struct file_operations portli_fops = {
+ 	.open			= xhci_portli_open,
+ 	.read			= seq_read,
+ 	.llseek			= seq_lseek,
+-	.release		= single_release,
++	.release		= xhci_port_release,
+ };
+ 
+ static void xhci_debugfs_create_files(struct xhci_hcd *xhci,

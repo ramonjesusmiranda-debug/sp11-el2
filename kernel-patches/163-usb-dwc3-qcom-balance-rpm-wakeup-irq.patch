@@ -1,0 +1,50 @@
+From fe196cfd9705440985223c62b6865993144cb5fd Mon Sep 17 00:00:00 2001
+From: Anthony Ruhier <aruhier@mailbox.org>
+Date: Sat, 17 Oct 2026 14:53:58 +0200
+Subject: [PATCH] usb: dwc3: qcom: balance runtime PM in the wakeup interrupt
+
+The DP and DM HS PHY wakeup interrupts can fire back to back, for
+instance right after the glue runtime suspends following a disconnect.
+The first handler resumes xHCI, and rpm_resume() then queues an async
+autosuspend for it. The second handler's pm_runtime_resume() finds
+xHCI already active: rpm_resume() returns 1 without queueing an idle,
+but it has cleared power.request on the way, cancelling the suspend
+queued by the first handler. Nothing requests it again, so xHCI and the
+glue stay runtime active, with their interconnect votes, until
+something else touches runtime PM.
+
+Take and drop a reference instead, so that each handler re-evaluates
+whether xHCI can suspend. A real wakeup still keeps it active, as
+xhci_resume() resumes the root hub on a pending port event.
+
+Seen on a Lenovo Yoga Slim 7x after unplugging a USB-C monitor with a
+hub: the two controllers used by it stayed active until power/control
+was toggled.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/usb/dwc3/dwc3-qcom.c | 10 ++++++++--
+ 1 file changed, 8 insertions(+), 2 deletions(-)
+
+diff --git a/drivers/usb/dwc3/dwc3-qcom.c b/drivers/usb/dwc3/dwc3-qcom.c
+index ac68b4218b56b..ca8307219e5f8 100644
+--- a/drivers/usb/dwc3/dwc3-qcom.c
++++ b/drivers/usb/dwc3/dwc3-qcom.c
+@@ -412,9 +412,15 @@ static irqreturn_t qcom_dwc3_resume_irq(int irq, void *data)
+ 	/*
+ 	 * This is safe as role switching is done from a freezable workqueue
+ 	 * and the wakeup interrupts are disabled as part of resume.
++	 *
++	 * The DP and DM wakeup interrupts can fire together. A bare resume
++	 * from the second one cancels the suspend request queued after the
++	 * first one, leaving the controller active, so balance it with a put.
+ 	 */
+-	if (dwc3_qcom_is_host(qcom))
+-		pm_runtime_resume(&dwc->xhci->dev);
++	if (dwc3_qcom_is_host(qcom)) {
++		pm_runtime_get_sync(&dwc->xhci->dev);
++		pm_runtime_put_autosuspend(&dwc->xhci->dev);
++	}
+ 
+ 	return IRQ_HANDLED;
+ }

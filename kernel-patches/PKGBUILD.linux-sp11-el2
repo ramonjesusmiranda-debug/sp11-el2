@@ -14,7 +14,7 @@
 
 pkgbase=linux-sp11-el2
 pkgver=7.2.8.arch1
-pkgrel=8
+pkgrel=11
 pkgdesc='Surface Pro 11 Linux EXPERIMENTAL para arrancar en EL2 (slbounce): reposo + enganche a DSP ya arrancados'
 url='https://github.com/dwhinham/linux-sp11'
 _commit=616a9f22113e7dc96e558b4426424ea1d7511092
@@ -82,7 +82,6 @@ source=(
   "124-7e6964e41863.patch"
   "125-cpuidle-psci-deep-off.patch"
   "126-arch-timer-park-stopped-timers.patch"
-  "127-ddr-votos-suspension-bwmon-pcie.patch"
   "128-tzmem-shm-bridge-self-owner-el2.patch"
   "129-x1-el2-dma40-iris-shm-bridge.patch"
   "130-x1e-dsp-0003-pmic-glink-defer.patch"
@@ -97,7 +96,6 @@ source=(
   "139-x1e-dsp-0012-x1-el2-dsps-sp11.patch"
   "140-lpass-wsa-va-macro-release-votes.patch"
   "141-x1e-dsp-socinfo-cdsp-dtb-desc.patch"
-  "142-dpu-keep-vblank-entering-self-refresh.patch"
   "143-memlat-firmware-arm-scmi-Add-SCMI-QCOM-Generic.patch"
   "144-memlat-dt-bindings-firmware-arm-scmi-Add-Qualcomm.patch"
   "145-memlat-firmware-arm-scmi-vendors-Add-QCOM-SCMI.patch"
@@ -108,10 +106,26 @@ source=(
   "150-memlat-arm64-dts-qcom-glymur-Enable-LLCC-DDR-DDR-QOS.patch"
   "151-memlat-arm64-dts-qcom-hamoa-Enable-LLCC-DDR-DDR-QOS.patch"
   "159-x1e-dsp-cdsp-spmi-windows.patch"
+  "160-dpu-count-pending-frame-before-kickoff.patch"
+  "161-dpu-lower-core-clock-runtime-suspend.patch"
+  "162-dts-hamoa-fix-usb-1-ss0-noc-clocks.patch"
+  "163-usb-dwc3-qcom-balance-rpm-wakeup-irq.patch"
+  "164-usb-dwc3-qcom-backoff-runtime-suspend-hs-phy.patch"
+  "165-usb-xhci-debugfs-resume-before-port-regs.patch"
+  "166-usb-typec-ps883x-no-power-safe-state.patch"
+  "167-drm-msm-dp-single-rpm-ref-plugged.patch"
+  "168-asoc-lpass-wsa-regcache-maple.patch"
+  "169-asoc-lpass-wsa-v2_5-compander1.patch"
+  "170-dts-hamoa-pcie-opp-and-gic-mem-vote.patch"
+  "171-dt-bindings-pci-qcom-gic-mem.patch"
+  "173-pci-quirk-wcn7850-disable-ltr.patch"
+  "174-dts-hamoa-pcie-t-power-on.patch"
+  "175-nvme-quirks-device-param.patch"
+  "176-surface-flex-kbd-backlight-and-bat-event.patch"
 )
 source_aarch64=(config.aarch64)
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
-sha256sums_aarch64=('96e7b20fd17908a71c5bc2cd3e4abe52f7b0d91658f2f3b8c333c1c93c7dfe26')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums_aarch64=('ed54a6f8531f29f7e7f398688b9bb098bf53f112262ae74a41d3ce73c6efb436')
 
 export KBUILD_BUILD_HOST=archlinux
 export KBUILD_BUILD_USER=$pkgbase

@@ -4,14 +4,17 @@ _esp() {
   [ -f $P ] && ! grep -q "^ALL_config=\"/etc/mkinitcpio-el2.conf\"" $P && sed -i "1a ALL_config=\"/etc/mkinitcpio-el2.conf\"" $P
   install -Dm644 /usr/share/sp11-el2/el2.nsh /boot/sl/el2.nsh
   install -Dm644 /usr/share/sp11-el2/el2-dsp.nsh /boot/sl/el2-dsp.nsh
+  install -Dm644 /usr/share/sp11-el2/el2-dsp-cdspgen.nsh /boot/sl/el2-dsp-cdspgen.nsh
+  install -Dm644 /usr/share/sp11-el2/sp11-el2-cdspgen.conf /boot/loader/entries/sp11-el2-cdspgen.conf
   install -Dm644 /usr/share/sp11-el2/sp11-el2-dsp.conf /boot/loader/entries/sp11-el2-dsp.conf
   install -Dm644 /usr/share/sp11-el2/sp11-el2.conf /boot/loader/entries/sp11-el2.conf
+  [ -d /usr/share/alsa/ucm2/Qualcomm/x1e80100 ] && install -Dm644 /usr/share/sp11-el2/Surface11-HiFi.conf /usr/share/alsa/ucm2/Qualcomm/x1e80100/Surface11-HiFi.conf || true
   [ -e /boot/shellaa64.efi ] || cp /usr/share/edk2-shell/aarch64/Shell_Full.efi /boot/shellaa64.efi 2>/dev/null || true
   [ -e /boot/sl/slbounce.efi ] || echo ">> Falta /boot/sl/slbounce.efi (y /boot/tcblaunch.exe): sin ellos no hay EL2"
 }
-post_install() { _esp; sed -i "s/^default .*/default sp11-el2-dsp.conf/" /boot/loader/loader.conf; systemctl enable sp11-el2-modulos.service 2>/dev/null || true; }
-post_upgrade() { _esp; grep -q "^default sp11-el2.conf" /boot/loader/loader.conf && sed -i "s/^default .*/default sp11-el2-dsp.conf/" /boot/loader/loader.conf; true; }
+post_install() { _esp; sed -i "s/^default .*/default sp11-el2-dsp.conf/" /boot/loader/loader.conf; systemctl enable sp11-el2-modulos.service 2>/dev/null || true; systemctl enable systemd-pstore.service 2>/dev/null || true; }
+post_upgrade() { _esp; grep -q "^default sp11-el2.conf" /boot/loader/loader.conf && sed -i "s/^default .*/default sp11-el2-dsp.conf/" /boot/loader/loader.conf; systemctl enable systemd-pstore.service 2>/dev/null || true; true; }
 pre_remove() {
   systemctl disable sp11-el2-modulos.service 2>/dev/null || true
-  rm -f /boot/loader/entries/sp11-el2.conf /boot/loader/entries/sp11-el2-dsp.conf /boot/sl/el2.nsh /boot/sl/el2-dsp.nsh /boot/sl/el2.efi /boot/sl/el2-dsp.efi
+  rm -f /boot/loader/entries/sp11-el2.conf /boot/loader/entries/sp11-el2-dsp.conf /boot/loader/entries/sp11-el2-cdspgen.conf /boot/sl/el2-dsp-cdspgen.nsh /boot/sl/el2-dsp-cdspgen.efi /boot/sl/el2.nsh /boot/sl/el2-dsp.nsh /boot/sl/el2.efi /boot/sl/el2-dsp.efi
 }

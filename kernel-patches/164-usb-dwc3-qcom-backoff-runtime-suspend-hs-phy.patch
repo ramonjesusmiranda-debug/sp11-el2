@@ -1,0 +1,96 @@
+From a32603d60858c4eff99cf8a2120c9f03c43673aa Mon Sep 17 00:00:00 2001
+From: Anthony Ruhier <aruhier@mailbox.org>
+Date: Tue, 20 Oct 2026 23:24:44 +0200
+Subject: [PATCH] usb: dwc3: qcom: back off runtime suspend when a HS PHY is
+ not in L2
+
+dwc3_qcom_suspend() checks that each HS PHY entered L2 before gating the
+clocks, but only logs when one did not. A PHY that is not in L2 has bus
+activity, typically a device being attached while the controller was on
+its way to runtime suspend. Gating the clocks under it leaves that
+event to the PHY wakeup interrupts, which are armed for the line state
+read from the root hub, so the attach can be missed or handled from an
+inconsistent state.
+
+Seen on a Lenovo Yoga Slim 7x (X1E80100):
+
+  dwc3-qcom a600000.usb: port-1 HS-PHY not in L2
+
+logged while a hub was being plugged in. It also happens on unplug: after
+removing a USB-C monitor with a hub from a800000, the glue runtime
+suspended 13 s later with port-1 not in L2. Once resumed, PORTSC of that
+port read 0x602a0 (RxDetect, CSC and PEC set) and the write-1-to-clear
+from the hub driver never took effect, so hub_wq kept clearing the
+connect change about 40 times a second and the controller never
+suspended again.
+
+In runtime suspend, undo dwc3_runtime_suspend() and return -EBUSY
+instead, after marking the device busy so that autosuspend tries again
+later. System suspend keeps the current behaviour.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ drivers/usb/dwc3/dwc3-qcom.c | 36 ++++++++++++++++++++++++++++++------
+ 1 file changed, 30 insertions(+), 6 deletions(-)
+
+diff --git a/drivers/usb/dwc3/dwc3-qcom.c b/drivers/usb/dwc3/dwc3-qcom.c
+index ca8307219e5f8..643711fc30e7e 100644
+--- a/drivers/usb/dwc3/dwc3-qcom.c
++++ b/drivers/usb/dwc3/dwc3-qcom.c
+@@ -335,19 +335,31 @@ static void dwc3_qcom_enable_interrupts(struct dwc3_qcom *qcom)
+ 		dwc3_qcom_enable_port_interrupts(&qcom->ports[i]);
+ }
+ 
+-static int dwc3_qcom_suspend(struct dwc3_qcom *qcom, bool wakeup)
++static bool dwc3_qcom_hs_phys_in_l2(struct dwc3_qcom *qcom)
+ {
++	bool in_l2 = true;
+ 	u32 val;
+-	int i, ret;
+-
+-	if (qcom->is_suspended)
+-		return 0;
++	int i;
+ 
+ 	for (i = 0; i < qcom->num_ports; i++) {
+ 		val = readl(qcom->qscratch_base + pwr_evnt_irq_stat_reg[i]);
+-		if (!(val & PWR_EVNT_LPM_IN_L2_MASK))
++		if (!(val & PWR_EVNT_LPM_IN_L2_MASK)) {
+ 			dev_err(qcom->dev, "port-%d HS-PHY not in L2\n", i + 1);
++			in_l2 = false;
++		}
+ 	}
++
++	return in_l2;
++}
++
++static int dwc3_qcom_suspend(struct dwc3_qcom *qcom, bool wakeup)
++{
++	int i, ret;
++
++	if (qcom->is_suspended)
++		return 0;
++
++	dwc3_qcom_hs_phys_in_l2(qcom);
+ 	clk_bulk_disable_unprepare(qcom->num_clocks, qcom->clks);
+ 
+ 	ret = dwc3_qcom_interconnect_disable(qcom);
+@@ -815,6 +827,18 @@ static int dwc3_qcom_runtime_suspend(struct device *dev)
+ 	if (ret)
+ 		return ret;
+ 
++	/*
++	 * A HS PHY that did not enter L2 has bus activity, such as a device
++	 * being attached. Gating the clocks now would leave that event to the
++	 * wakeup interrupts, which are armed for the old line state, so back
++	 * off and let autosuspend try again later.
++	 */
++	if (!dwc3_qcom_hs_phys_in_l2(qcom)) {
++		dwc3_runtime_resume(&qcom->dwc);
++		pm_runtime_mark_last_busy(dev);
++		return -EBUSY;
++	}
++
+ 	return dwc3_qcom_suspend(qcom, true);
+ }
+ 
