@@ -1,0 +1,38 @@
+#!/bin/bash
+# Pone o quita Howdy como primer paso de «auth» en sudo, polkit (diálogos de administrador) y kde (pantalla de bloqueo).
+# El inicio de sesión (plasmalogin) se deja con contraseña: con la cara no se abre KWallet.
+# Las líneas añadidas llevan la marca «howdy-sp11»; un servicio que solo existe en /usr/lib/pam.d se copia a /etc/pam.d.
+set -e
+MARCA="# howdy-sp11"
+CREADO="# creado por howdy-sp11-pam a partir de /usr/lib/pam.d"
+SERVICIOS=(${HOWDY_SERVICIOS:-sudo polkit-1 kde})
+[ "$(id -u)" = 0 ] || { echo "hace falta root" >&2; exit 1; }
+
+activar() {
+	local f=/etc/pam.d/$1
+	if [ ! -e "$f" ]; then
+		[ -e "/usr/lib/pam.d/$1" ] || { echo "$1: no existe, se salta"; return; }
+		{ echo "$CREADO"; cat "/usr/lib/pam.d/$1"; } > "$f"
+	fi
+	grep -q "$MARCA" "$f" && { echo "$1: ya estaba"; return; }
+	cp -a "$f" "$f.bak-howdy-$(date +%Y%m%d)"
+	# antes de la primera línea «auth»
+	awk -v l="auth       sufficient   pam_howdy.so  $MARCA" '!h && /^-?auth[ \t]/ {print l; h=1} {print}' "$f" > "$f.nuevo"
+	cat "$f.nuevo" > "$f" && rm "$f.nuevo"
+	echo "$1: activado"
+}
+
+desactivar() {
+	local f=/etc/pam.d/$1
+	[ -e "$f" ] || return 0
+	if head -1 "$f" | grep -qF "$CREADO"; then rm "$f"; echo "$1: quitado (era copia)"; return; fi
+	grep -q "$MARCA" "$f" || { echo "$1: no estaba"; return; }
+	sed -i "/$MARCA\$/d" "$f"
+	echo "$1: desactivado"
+}
+
+case "$1" in
+	activar|desactivar) for s in "${SERVICIOS[@]}"; do "$1" "$s"; done ;;
+	estado) for s in "${SERVICIOS[@]}"; do printf '%s: ' "$s"; grep -qs "$MARCA" "/etc/pam.d/$s" && echo activo || echo inactivo; done ;;
+	*) echo "uso: howdy-sp11-pam activar|desactivar|estado" >&2; exit 2 ;;
+esac

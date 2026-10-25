@@ -1,0 +1,73 @@
+# Paquete local: Howdy (desbloqueo con la cara) para la cámara IR VD55G0 de la Surface Pro 11. Parte del howdy-git
+# de AUR (SelfRef) con: aarch64, un parche para leer el nodo CAMSS en GREY sin conversión (la fila plana se reforma
+# al paso de línea y se recorta), el script que monta la ruta de medios antes de abrir la cámara (libcamera la deshace
+# al usar otra) y /dev/camara-ir por udev. El emisor IR lo enciende V4L2 al emitir (vd55g0-dkms 2 + sp11-el2 18).
+# Activar en PAM con «howdy-sp11-pam activar». 24-10-2026
+# pkgrel 2: exposición manual en preparar-ir (la automática quemaba la cara).
+_pkgbase=howdy
+pkgname=howdy-sp11
+pkgver=r592.d3ab993
+pkgrel=2
+pkgdesc="Howdy para la cámara IR de la Surface Pro 11 (VD55G0 por CAMSS)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/boltgolt/howdy"
+license=('MIT')
+makedepends=('git' 'meson' 'ninja' 'cmake')
+depends=('libinih' 'libevdev' 'python' 'python-dlib' 'python-opencv' 'v4l-utils' 'vd55g0-dkms')
+provides=('howdy')
+conflicts=('howdy' 'howdy-git')
+backup=('etc/howdy/config.ini')
+install=howdy.install
+source=(
+	"howdy::git+https://github.com/boltgolt/howdy.git#commit=d3ab993"
+	"https://github.com/davisking/dlib-models/raw/master/dlib_face_recognition_resnet_model_v1.dat.bz2"
+	"https://github.com/davisking/dlib-models/raw/master/mmod_human_face_detector.dat.bz2"
+	"https://github.com/davisking/dlib-models/raw/master/shape_predictor_5_face_landmarks.dat.bz2"
+	"polkit-agent-helper-howdy.conf"
+	"0001-video-capture-ir-gris-camss.patch"
+	"preparar-ir"
+	"70-camara-ir.rules"
+	"howdy-sp11-pam"
+)
+md5sums=('SKIP'
+         '1b31cc4419cc8f1018117249b64bd683'
+         '5edccec8ac713d743be4865ff6ead7f7'
+         'ef591cf713630226b35b11d0e1733118'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP'
+         'SKIP')
+
+prepare() {
+	cd "$srcdir/$_pkgbase"
+	patch -Np1 -i ../0001-video-capture-ir-gris-camss.patch
+}
+
+build() {
+	cd "$srcdir"
+	arch-meson "$_pkgbase" build
+	meson compile -C build
+}
+
+package() {
+	cd "$srcdir"
+	meson install -C build --destdir "$pkgdir"
+	install -Dm644 "$_pkgbase/howdy/src/config.ini" "$pkgdir/etc/howdy/config.ini"
+	install -Dm644 "$_pkgbase/LICENSE" "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+	install -Dm644 *.dat -t "$pkgdir/usr/share/dlib-data"
+
+	# Workaround for polkit 127+ breaking howdy (boltgolt/howdy#1077)
+	install -Dm644 polkit-agent-helper-howdy.conf \
+		"$pkgdir/usr/lib/systemd/system/polkit-agent-helper@.service.d/10-howdy.conf"
+
+	# Surface Pro 11: cámara IR por CAMSS
+	install -Dm755 preparar-ir "$pkgdir/usr/lib/howdy-sp11/preparar-ir"
+	install -Dm755 howdy-sp11-pam "$pkgdir/usr/bin/howdy-sp11-pam"
+	install -Dm644 70-camara-ir.rules "$pkgdir/usr/lib/udev/rules.d/70-camara-ir.rules"
+	sed -i -e 's|^device_path = none|device_path = /dev/camara-ir|' \
+		-e 's|^frame_width = -1|frame_width = 644|' \
+		-e 's|^frame_height = -1|frame_height = 604|' \
+		-e 's|^recording_plugin = opencv|recording_plugin = opencv\n\n# SP11: formato V4L2 crudo (GREY) y preparación de la ruta de medios de CAMSS\ndevice_fourcc = GREY\nprepare_command = /usr/lib/howdy-sp11/preparar-ir|' \
+		"$pkgdir/etc/howdy/config.ini"
+}

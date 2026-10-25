@@ -1,0 +1,14 @@
+post_install() {
+	udevadm control --reload 2>/dev/null && udevadm trigger --subsystem-match=video4linux 2>/dev/null || true
+	echo '[SP11] 1. Registrar la cara: sudo howdy add   (comprobar antes con: sudo howdy test)'
+	echo '[SP11] 2. Activar en sudo, polkit y la pantalla de bloqueo: sudo howdy-sp11-pam activar'
+	echo '[SP11]    Quitarlo: sudo howdy-sp11-pam desactivar'
+}
+
+post_upgrade() {
+	udevadm control --reload 2>/dev/null && udevadm trigger --subsystem-match=video4linux 2>/dev/null || true
+}
+
+pre_remove() {
+	howdy-sp11-pam desactivar || true
+}

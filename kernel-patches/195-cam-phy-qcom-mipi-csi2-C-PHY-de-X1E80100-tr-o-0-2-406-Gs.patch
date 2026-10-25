@@ -1,0 +1,291 @@
+From e57965ec04aa77e69622e93bed0a50ba0151cd8f Mon Sep 17 00:00:00 2001
+From: Ramón Jesús Miranda <ramonjesusmiranda@gmail.com>
+Date: Sat, 24 Oct 2026 15:43:57 +0000
+Subject: [PATCH 195/197] phy: qcom-mipi-csi2: X1E80100 C-PHY (trio 0, 2.406 Gsym/s) on top of the v18 driver; camss: C-PHY mode
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Ported from ooaklee/linux_ms_dev_kit-sp11 PR #22 to the Linaro v18 PHY
+driver (no ISR of its own: the IRQ status is cleared once after the
+sequence).
+---
+ .../media/platform/qcom/camss/camss-csiphy.c  | 32 +++++++-
+ .../qualcomm/phy-qcom-mipi-csi2-3ph-dphy.c    | 80 +++++++++++++++++++
+ .../phy/qualcomm/phy-qcom-mipi-csi2-core.c    | 53 +++++++++++-
+ drivers/phy/qualcomm/phy-qcom-mipi-csi2.h     |  4 +
+ 4 files changed, 166 insertions(+), 3 deletions(-)
+
+diff --git a/drivers/media/platform/qcom/camss/camss-csiphy.c b/drivers/media/platform/qcom/camss/camss-csiphy.c
+index aaed7d030..8b3df8998 100644
+--- a/drivers/media/platform/qcom/camss/camss-csiphy.c
++++ b/drivers/media/platform/qcom/camss/camss-csiphy.c
+@@ -336,7 +336,10 @@ static int csiphy_stream_on(struct csiphy_device *csiphy)
+ 
+ 	dphy_cfg = &dphy_opts.mipi_dphy;
+ 
+-	link_freq = camss_get_link_freq(&csiphy->subdev.entity, bpp, num_lanes);
++	if (csiphy->cfg.csi2->bus_type == V4L2_MBUS_CSI2_CPHY)
++		link_freq = camss_get_link_freq(&csiphy->subdev.entity, 0, 0);
++	else
++		link_freq = camss_get_link_freq(&csiphy->subdev.entity, bpp, num_lanes);
+ 
+ 	if (link_freq <= 0) {
+ 		dev_err(dev,
+@@ -344,6 +347,33 @@ static int csiphy_stream_on(struct csiphy_device *csiphy)
+ 		return -EINVAL;
+ 	}
+ 
++	if (csiphy->cfg.csi2->bus_type == V4L2_MBUS_CSI2_CPHY) {
++		if (num_lanes != 1)
++			return -EINVAL;
++
++		/*
++		 * V4L2 exposes half the C-PHY symbol rate as LINK_FREQ.  Carry
++		 * the symbol rate in hs_clk_rate and the trio in the submode.
++		 */
++		dphy_cfg->hs_clk_rate = link_freq * 2;
++		dphy_cfg->lanes = num_lanes;
++
++		ret = phy_set_mode_ext(csiphy->phy, PHY_MODE_MIPI_CPHY,
++				       lncfg->data[0].pos);
++		if (ret) {
++			dev_err(dev, "Failed to set C-PHY mode\n");
++			return ret;
++		}
++
++		ret = phy_configure(csiphy->phy, &dphy_opts);
++		if (ret) {
++			dev_err(dev, "failed to configure MIPI C-PHY\n");
++			goto error;
++		}
++
++		return phy_power_on(csiphy->phy);
++	}
++
+ 	ret = phy_mipi_dphy_get_default_config_for_hsclk(link_freq, num_lanes,
+ 							 dphy_cfg);
+ 	if (ret < 0) {
+diff --git a/drivers/phy/qualcomm/phy-qcom-mipi-csi2-3ph-dphy.c b/drivers/phy/qualcomm/phy-qcom-mipi-csi2-3ph-dphy.c
+index 966d79c98..6095889c7 100644
+--- a/drivers/phy/qualcomm/phy-qcom-mipi-csi2-3ph-dphy.c
++++ b/drivers/phy/qualcomm/phy-qcom-mipi-csi2-3ph-dphy.c
+@@ -268,6 +268,75 @@ phy_qcom_mipi_csi2_gen2_config_lanes(struct mipi_csi2phy_device *csi2phy,
+ 	}
+ }
+ 
++#include "phy-qcom-mipi-csi2-cphy-x1e80100.h"
++
++#define X1E80100_CPHY_SYMBOL_RATE	2406000000UL
++
++static bool is_x1e80100_cphy(struct mipi_csi2phy_device *csi2phy,
++			     const struct mipi_csi2phy_stream_cfg *cfg)
++{
++	return csi2phy->soc_cfg == &mipi_csi2_dphy_4nm_x1e &&
++	       cfg->cphy && cfg->cphy_trio == 0 &&
++	       cfg->num_data_lanes == 1 &&
++	       cfg->link_freq == (s64)csi2phy->soc_cfg->cphy_symbol_rate;
++}
++
++static void x1e80100_cphy_write(struct mipi_csi2phy_device *csi2phy,
++				const struct x1e80100_cphy_reg *table,
++				unsigned int num_entries)
++{
++	unsigned int i;
++
++	might_sleep();
++
++	for (i = 0; i < num_entries; i++) {
++		u32 delay_us;
++
++		/* writel() preserves the ordering seen at the runtime MMIO writer. */
++		writel(table[i].reg_data, csi2phy->base + table[i].reg_addr);
++
++		if (!table[i].delay_ns)
++			continue;
++
++		/* The observed writer floors nanoseconds and enforces a 1 us minimum. */
++		delay_us = max_t(u32, table[i].delay_ns / NSEC_PER_USEC, 1);
++		if (delay_us <= 50)
++			udelay(delay_us);
++		else
++			usleep_range(delay_us,
++				     delay_us + max(delay_us / 100, 10U));
++	}
++}
++
++static int
++phy_qcom_mipi_csi2_cphy_lanes_enable(struct mipi_csi2phy_device *csi2phy,
++				     struct mipi_csi2phy_stream_cfg *cfg)
++{
++	if (!is_x1e80100_cphy(csi2phy, cfg))
++		return -EOPNOTSUPP;
++
++	BUILD_BUG_ON(ARRAY_SIZE(x1e80100_cphy_reset) != 2);
++	BUILD_BUG_ON(ARRAY_SIZE(x1e80100_cphy_toggle) != 6);
++	BUILD_BUG_ON(ARRAY_SIZE(x1e80100_cphy_common) != 9);
++	BUILD_BUG_ON(ARRAY_SIZE(x1e80100_cphy_config) != 121);
++	BUILD_BUG_ON(ARRAY_SIZE(x1e80100_cphy_irq_clear) != 24);
++	BUILD_BUG_ON(ARRAY_SIZE(x1e80100_cphy_shutdown) != 3);
++
++	x1e80100_cphy_write(csi2phy, x1e80100_cphy_reset,
++			    ARRAY_SIZE(x1e80100_cphy_reset));
++	x1e80100_cphy_write(csi2phy, x1e80100_cphy_toggle,
++			    ARRAY_SIZE(x1e80100_cphy_toggle));
++	x1e80100_cphy_write(csi2phy, x1e80100_cphy_common,
++			    ARRAY_SIZE(x1e80100_cphy_common));
++	x1e80100_cphy_write(csi2phy, x1e80100_cphy_config,
++			    ARRAY_SIZE(x1e80100_cphy_config));
++	/* No PHY ISR in this driver: clear the latched status once here. */
++	x1e80100_cphy_write(csi2phy, x1e80100_cphy_irq_clear,
++			    ARRAY_SIZE(x1e80100_cphy_irq_clear));
++
++	return 0;
++}
++
+ static int phy_qcom_mipi_csi2_lanes_enable(struct mipi_csi2phy_device *csi2phy,
+ 					   struct mipi_csi2phy_stream_cfg *cfg)
+ {
+@@ -277,6 +346,9 @@ static int phy_qcom_mipi_csi2_lanes_enable(struct mipi_csi2phy_device *csi2phy,
+ 	u8 val;
+ 	int i;
+ 
++	if (cfg->cphy)
++		return phy_qcom_mipi_csi2_cphy_lanes_enable(csi2phy, cfg);
++
+ 	if (cfg->link_freq <= 0)
+ 		return -EINVAL;
+ 
+@@ -338,6 +410,12 @@ phy_qcom_mipi_csi2_lanes_disable(struct mipi_csi2phy_device *csi2phy,
+ {
+ 	const struct mipi_csi2phy_device_regs *regs = csi2phy_dev_to_regs(csi2phy);
+ 
++	if (is_x1e80100_cphy(csi2phy, cfg)) {
++		x1e80100_cphy_write(csi2phy, x1e80100_cphy_shutdown,
++				    ARRAY_SIZE(x1e80100_cphy_shutdown));
++		return;
++	}
++
+ 	writel(0, csi2phy->base +
+ 	       CSIPHY_3PH_CMN_CSI_COMMON_CTRLn(regs->common_regs_offset, 5));
+ 
+@@ -376,6 +454,8 @@ const struct mipi_csi2phy_soc_cfg mipi_csi2_dphy_4nm_x1e = {
+ 		.lane_array_size = ARRAY_SIZE(lane_regs_x1e80100),
+ 		.common_regs_offset = 0x1000,
+ 	},
++	.cphy_symbol_rate = X1E80100_CPHY_SYMBOL_RATE,
++	.cphy_trio_mask = BIT(0),
+ 	.supply_names = (const char **)x1e_supplies,
+ 	.num_supplies = ARRAY_SIZE(x1e_supplies),
+ 	.clk_names = (const char **)x1e_clks,
+diff --git a/drivers/phy/qualcomm/phy-qcom-mipi-csi2-core.c b/drivers/phy/qualcomm/phy-qcom-mipi-csi2-core.c
+index c0a4fa20e..9287a796a 100644
+--- a/drivers/phy/qualcomm/phy-qcom-mipi-csi2-core.c
++++ b/drivers/phy/qualcomm/phy-qcom-mipi-csi2-core.c
+@@ -35,7 +35,13 @@ phy_qcom_mipi_csi2_set_clock_rates(struct mipi_csi2phy_device *csi2phy,
+ 	int i, pstate;
+ 	int ret;
+ 
+-	opp = dev_pm_opp_find_freq_ceil(dev, &opp_rate);
++	/* C-PHY: the symbol rate is above the OPP table, vote the maximum. */
++	if (csi2phy->stream_cfg.cphy) {
++		opp_rate = ULONG_MAX;
++		opp = dev_pm_opp_find_freq_floor(dev, &opp_rate);
++	} else {
++		opp = dev_pm_opp_find_freq_ceil(dev, &opp_rate);
++	}
+ 	if (IS_ERR(opp)) {
+ 		dev_err(csi2phy->dev, "Couldn't find ceiling for %lld Hz\n",
+ 			link_freq);
+@@ -104,6 +110,20 @@ static int phy_qcom_mipi_csi2_configure(struct phy *phy,
+ 	struct mipi_csi2phy_stream_cfg *stream_cfg = &csi2phy->stream_cfg;
+ 	int ret;
+ 
++	if (csi2phy->phy_mode == PHY_MODE_MIPI_CPHY) {
++		/*
++		 * Until generic C-PHY options exist, the consumer carries the
++		 * symbol rate in hs_clk_rate and the number of trios in lanes.
++		 */
++		if (dphy_cfg->lanes != 1 || !dphy_cfg->hs_clk_rate)
++			return -EINVAL;
++		if (dphy_cfg->hs_clk_rate != csi2phy->soc_cfg->cphy_symbol_rate)
++			return -EOPNOTSUPP;
++
++		stream_cfg->link_freq = dphy_cfg->hs_clk_rate;
++		return 0;
++	}
++
+ 	ret = phy_mipi_dphy_config_validate(dphy_cfg);
+ 	if (ret)
+ 		return ret;
+@@ -124,8 +144,19 @@ static int phy_qcom_mipi_csi2_set_mode(struct phy *phy,
+ {
+ 	struct mipi_csi2phy_device *csi2phy = phy_get_drvdata(phy);
+ 
+-	if (mode != PHY_MODE_MIPI_DPHY)
++	switch (mode) {
++	case PHY_MODE_MIPI_DPHY:
++		if (csi2phy->stream_cfg.cphy || submode)
++			return -EINVAL;
++		break;
++	case PHY_MODE_MIPI_CPHY:
++		if (!csi2phy->stream_cfg.cphy ||
++		    submode != csi2phy->stream_cfg.cphy_trio)
++			return -EINVAL;
++		break;
++	default:
+ 		return -EOPNOTSUPP;
++	}
+ 
+ 	csi2phy->phy_mode = mode;
+ 	return 0;
+@@ -278,6 +309,24 @@ static int phy_qcom_mipi_csi2_parse_routing(struct mipi_csi2phy_device *csi2phy)
+ 	bus_type = MEDIA_BUS_TYPE_CSI2_DPHY;
+ 	fwnode_property_read_u32(ep, "bus-type", &bus_type);
+ 
++	if (bus_type == MEDIA_BUS_TYPE_CSI2_CPHY) {
++		/* C-PHY: a single trio, data-lanes holds its 0-based index */
++		if (fwnode_property_count_u32(ep, "data-lanes") != 1 ||
++		    fwnode_property_read_u32(ep, "data-lanes", &data_lanes[0]) ||
++		    data_lanes[0] >= BITS_PER_LONG ||
++		    !(csi2phy->soc_cfg->cphy_trio_mask & BIT(data_lanes[0]))) {
++			ret = -EOPNOTSUPP;
++			dev_err(dev, "Unsupported C-PHY trio\n");
++			goto out_put;
++		}
++
++		stream_cfg->cphy = true;
++		stream_cfg->cphy_trio = data_lanes[0];
++		stream_cfg->num_data_lanes = 1;
++		ret = 0;
++		goto out_put;
++	}
++
+ 	if (bus_type != MEDIA_BUS_TYPE_CSI2_DPHY) {
+ 		ret = -EOPNOTSUPP;
+ 		dev_err(dev, "Unsupported bus-type %u\n", bus_type);
+diff --git a/drivers/phy/qualcomm/phy-qcom-mipi-csi2.h b/drivers/phy/qualcomm/phy-qcom-mipi-csi2.h
+index 7e55ae007..85113f3c6 100644
+--- a/drivers/phy/qualcomm/phy-qcom-mipi-csi2.h
++++ b/drivers/phy/qualcomm/phy-qcom-mipi-csi2.h
+@@ -24,6 +24,8 @@ struct mipi_csi2phy_lanes_cfg {
+ };
+ 
+ struct mipi_csi2phy_stream_cfg {
++	bool cphy;
++	u8 cphy_trio;
+ 	s64 link_freq;
+ 	u8 num_data_lanes;
+ 	struct mipi_csi2phy_lanes_cfg lane_cfg;
+@@ -61,6 +63,8 @@ struct mipi_csi2_genpd {
+ struct mipi_csi2phy_soc_cfg {
+ 	const struct mipi_csi2phy_hw_ops *ops;
+ 	const struct mipi_csi2phy_device_regs reg_info;
++	const unsigned long cphy_symbol_rate;
++	const unsigned long cphy_trio_mask;
+ 
+ 	const char ** const supply_names;
+ 	const unsigned int num_supplies;
+-- 
+2.43.0
+

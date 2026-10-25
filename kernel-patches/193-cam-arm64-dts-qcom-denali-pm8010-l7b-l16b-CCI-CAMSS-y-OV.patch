@@ -1,0 +1,222 @@
+From 18773ede42aaa0678697f58273e833d34d9f8416 Mon Sep 17 00:00:00 2001
+From: Ramón Jesús Miranda <ramonjesusmiranda@gmail.com>
+Date: Sat, 24 Oct 2026 15:34:53 +0000
+Subject: [PATCH 193/197] arm64: dts: qcom: denali: pm8010, l7b/l16b, CCI, CAMSS and rear OV13858 (CSIPHY1)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../boot/dts/qcom/x1-microsoft-denali.dtsi    | 164 ++++++++++++++++++
+ 1 file changed, 164 insertions(+)
+
+diff --git a/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi b/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
+index 5d4e66fad..d34567f73 100644
+--- a/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
++++ b/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
+@@ -9,6 +9,7 @@
+ #include <dt-bindings/input/gpio-keys.h>
+ #include <dt-bindings/input/input.h>
+ #include <dt-bindings/interrupt-controller/irq.h>
++#include <dt-bindings/media/video-interfaces.h>
+ #include <dt-bindings/regulator/qcom,rpmh-regulator.h>
+ 
+ #include "hamoa-pmics.dtsi"
+@@ -529,6 +530,14 @@ vreg_l6b_1p8: ldo6 {
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
++		/* Cámara frontal AVDD (Windows: PPP LDO7_B 2,8 V) */
++		vreg_l7b_2p8: ldo7 {
++			regulator-name = "vreg_l7b_2p8";
++			regulator-min-microvolt = <2800000>;
++			regulator-max-microvolt = <2800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
+ 		vreg_l8b_3p0: ldo8 {
+ 			regulator-name = "vreg_l8b_3p0";
+ 			regulator-min-microvolt = <3072000>;
+@@ -578,6 +587,14 @@ vreg_l15b_1p8: ldo15 {
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
++		/* VCM de la cámara trasera (Windows: LDO16_B 2,9 V) */
++		vreg_l16b_2p9: ldo16 {
++			regulator-name = "vreg_l16b_2p9";
++			regulator-min-microvolt = <2900000>;
++			regulator-max-microvolt = <2900000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
+ 		vreg_l17b_2p5: ldo17 {
+ 			regulator-name = "vreg_l17b_2p5";
+ 			regulator-min-microvolt = <2504000>;
+@@ -739,6 +756,67 @@ vreg_l3i_0p8: ldo3 {
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 	};
++	/* PMIC de cámara; tensiones de los recursos PEP de Windows (CAMF/CAMS/CAMI) */
++	regulators-8 {
++		compatible = "qcom,pm8010-rpmh-regulators";
++		qcom,pmic-id = "m";
++
++		vdd-l1-l2-supply = <&vreg_s5j_1p2>;
++		vdd-l3-l4-supply = <&vreg_s4c_1p8>;
++		vdd-l5-supply = <&vreg_bob1>;
++		vdd-l6-supply = <&vreg_s4c_1p8>;
++		vdd-l7-supply = <&vreg_bob1>;
++
++		vreg_l1m_1p2: ldo1 {
++			regulator-name = "vreg_l1m_1p2";
++			regulator-min-microvolt = <1200000>;
++			regulator-max-microvolt = <1200000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l2m_1p15: ldo2 {
++			regulator-name = "vreg_l2m_1p15";
++			regulator-min-microvolt = <1150000>;
++			regulator-max-microvolt = <1150000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l3m_1p8: ldo3 {
++			regulator-name = "vreg_l3m_1p8";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l4m_1p8: ldo4 {
++			regulator-name = "vreg_l4m_1p8";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l5m_2p8: ldo5 {
++			regulator-name = "vreg_l5m_2p8";
++			regulator-min-microvolt = <2800000>;
++			regulator-max-microvolt = <2800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l6m_1p8: ldo6 {
++			regulator-name = "vreg_l6m_1p8";
++			regulator-min-microvolt = <1800000>;
++			regulator-max-microvolt = <1800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++
++		vreg_l7m_2p8: ldo7 {
++			regulator-name = "vreg_l7m_2p8";
++			regulator-min-microvolt = <2800000>;
++			regulator-max-microvolt = <2800000>;
++			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
++		};
++	};
++
+ 
+ 	regulators-7 {
+ 		compatible = "qcom,pm8550ve-rpmh-regulators";
+@@ -1226,10 +1304,96 @@ right_spkr: speaker@0,1 {
+ 	};
+ };
+ 
++&camss {
++	status = "okay";
++};
++
++&camss_csiphy1_in_port {
++	camss_csiphy1_inep: endpoint {
++		data-lanes = <1 2 3 4>;
++		remote-endpoint = <&csiphy1_out_ep>;
++	};
++};
++
++&cci0 {
++	status = "okay";
++};
++
++&cci1 {
++	status = "okay";
++};
++
++/* Trasera: OV13858 en 0x10 (SCFG_REAR: 0x20 en 8 bits; id 0xd855 en 0x300b). Bus CCI y CSIPHY por confirmar. */
++&cci0_i2c0 {
++	camera@10 {
++		compatible = "ovti,ov13858";
++		reg = <0x10>;
++
++		reset-gpios = <&tlmm 110 GPIO_ACTIVE_LOW>;
++		pinctrl-names = "default";
++		pinctrl-0 = <&cam_rear_default>;
++
++		clocks = <&camcc CAM_CC_MCLK1_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK1_CLK>;
++		assigned-clock-rates = <19200000>;
++
++		orientation = <1>; /* trasera */
++
++		dovdd-supply = <&vreg_l6m_1p8>;
++		dvdd-supply = <&vreg_l1m_1p2>;
++		avdd-supply = <&vreg_l5m_2p8>;
++
++		port {
++			ov13858_ep: endpoint {
++				data-lanes = <1 2 3 4>;
++				link-frequencies = /bits/ 64 <540000000 270000000>;
++				remote-endpoint = <&csiphy1_in_ep>;
++			};
++		};
++	};
++};
++
++&csiphy1 {
++	vdda-0p9-supply = <&vreg_l2c_0p8>;
++	vdda-1p2-supply = <&vreg_l1c_1p2>;
++
++	status = "okay";
++};
++
++&csiphy1_in_port {
++	csiphy1_in_ep: endpoint {
++		bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
++		data-lanes = <1 2 3 4>;
++		remote-endpoint = <&ov13858_ep>;
++	};
++};
++
++&csiphy1_out_port {
++	csiphy1_out_ep: endpoint {
++		remote-endpoint = <&camss_csiphy1_inep>;
++	};
++};
++
+ &tlmm {
+ 	gpio-reserved-ranges = <44 4>, /* SPI (TPM) */
+ 			       <238 1>; /* UFS Reset */
+ 
++	cam_rear_default: cam-rear-default-state {
++		mclk-pins {
++			pins = "gpio97";
++			function = "cam_mclk";
++			drive-strength = <2>;
++			bias-disable;
++		};
++
++		reset-n-pins {
++			pins = "gpio110";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-disable;
++		};
++	};
++
+ 	hall_int_n_default: hall-int-n-state {
+ 		pins = "gpio2";
+ 		function = "gpio";
+-- 
+2.43.0
+

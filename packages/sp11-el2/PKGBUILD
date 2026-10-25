@@ -1,9 +1,10 @@
 # Paquete local: arranque y reposo de la Surface Pro 11 en EL2 (slbounce). Construye /boot/sl/el2.efi con el kernel
 # linux-sp11-el2, añade la entrada «Arch Linux EL2» al menú (consola UEFI + el2.nsh) y el gancho de reposo que
 # consigue CXSD y DDR LPM (~0,28 W). Requiere slbounce.efi y tcblaunch.exe en /boot/sl (no se redistribuyen). 17-10-2026
+# pkgrel 18 (24-10-2026): emisor IR = flash del PM8550 (canales 1 y 4), LED «privacy» de la cámara IR en el overlay.
 pkgname=sp11-el2
 pkgver=2026.10.17
-pkgrel=12
+pkgrel=19
 pkgdesc="Surface Pro 11: arranque EL2 (slbounce) con reposo profundo"
 arch=("any")
 license=("GPL-2.0-only")
@@ -13,10 +14,10 @@ install=sp11-el2.install
 source=("sp11-el2-uki" "97-sp11-el2-uki.hook" "sp11-el2-modulos.service" "sp11-el2-reposo.sh" "el2.nsh" "sp11-el2.conf"
         "mkinitcpio-el2.conf" "sp11-el2-fase2.dtso" "sp11-el2-sin-ss1.dtso" "sp11-el2-sleepstate.dtso"
         "sp11-el2-cl5-solo-suspension.dtso" "sp11-el2-adsp-adjunto.dtso" "el2-dsp.nsh" "sp11-el2-dsp.conf" "90-sp11-wireplumber-sin-video.conf" "90-sp11-diagnostico.conf" "sp11-pstore.conf"
-        "sp11-el2-cdsp-generico.dtso" "el2-dsp-cdspgen.nsh" "sp11-el2-cdspgen.conf" "sp11-el2-blacklist.conf" "Surface11-HiFi.conf")
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+        "sp11-el2-cdsp-generico.dtso" "el2-dsp-cdspgen.nsh" "sp11-el2-cdspgen.conf" "Surface11-HiFi.conf" "sp11-firefox-camara.js" "sp11-el2-camara-ir.dtso")
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 build() {
-  for o in sp11-el2-fase2 sp11-el2-sin-ss1 sp11-el2-sleepstate sp11-el2-cl5-solo-suspension sp11-el2-adsp-adjunto sp11-el2-cdsp-generico; do
+  for o in sp11-el2-fase2 sp11-el2-sin-ss1 sp11-el2-sleepstate sp11-el2-cl5-solo-suspension sp11-el2-adsp-adjunto sp11-el2-cdsp-generico sp11-el2-camara-ir; do
     dtc -@ -q -I dts -O dtb -o "$o.dtbo" "$o.dtso"
   done
 }
@@ -26,11 +27,11 @@ package() {
   install -Dm644 sp11-el2-modulos.service -t "$pkgdir/usr/lib/systemd/system"
   install -Dm644 90-sp11-diagnostico.conf -t "$pkgdir/usr/lib/sysctl.d"
   install -Dm644 sp11-pstore.conf -t "$pkgdir/usr/lib/modules-load.d"
-  install -Dm644 sp11-el2-blacklist.conf -t "$pkgdir/usr/lib/modprobe.d"
   install -Dm755 sp11-el2-reposo.sh "$pkgdir/usr/lib/systemd/system-sleep/zz-sp11-el2.sh"
   install -Dm644 mkinitcpio-el2.conf "$pkgdir/etc/mkinitcpio-el2.conf"
   install -Dm644 *.dtbo *.dtso -t "$pkgdir/usr/share/sp11-el2"
   install -Dm644 el2.nsh el2-dsp.nsh el2-dsp-cdspgen.nsh -t "$pkgdir/usr/share/sp11-el2"
   install -Dm644 90-sp11-wireplumber-sin-video.conf -t "$pkgdir/usr/share/wireplumber/wireplumber.conf.d"
+  install -Dm644 sp11-firefox-camara.js -t "$pkgdir/usr/lib/firefox/defaults/pref"
   install -Dm644 sp11-el2.conf sp11-el2-dsp.conf sp11-el2-cdspgen.conf Surface11-HiFi.conf -t "$pkgdir/usr/share/sp11-el2"
 }

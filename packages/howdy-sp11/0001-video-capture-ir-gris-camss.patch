@@ -1,0 +1,48 @@
+--- a/howdy/src/recorders/video_capture.py
++++ b/howdy/src/recorders/video_capture.py
+@@ -5,6 +5,7 @@
+ import configparser
+ import cv2
+ import os
++import subprocess
+ import sys
+ 
+ from i18n import _
+@@ -39,6 +40,11 @@
+ 				print("\n\tsudo howdy config\n")
+ 			sys.exit(14)
+ 
++		# Command that prepares the media pipeline before opening the device (Qualcomm CAMSS)
++		prepare_command = self.config.get("video", "prepare_command", fallback="")
++		if prepare_command:
++			subprocess.run(prepare_command, shell=True, check=False)
++
+ 		# Create reader
+ 		# The internal video recorder
+ 		self.internal = None
+@@ -85,6 +91,12 @@
+ 			print(_("Failed to read camera specified in the 'device_path' config option, aborting"))
+ 			sys.exit(14)
+ 
++		# Raw grey frames (CONVERT_RGB off) arrive as one flat row with padded lines:
++		# reshape to the line stride, crop the padding and hand back BGR + grey like pyv4l2
++		if frame.ndim == 2 and frame.shape[0] == 1 and self.fh > 0 and self.fw > 0:
++			gsframe = frame.reshape(self.fh, -1)[:, :self.fw].copy()
++			return cv2.cvtColor(gsframe, cv2.COLOR_GRAY2BGR), gsframe
++
+ 		try:
+ 			# Convert from color to grayscale
+ 			# First processing of frame, so frame errors show up here
+@@ -136,6 +148,12 @@
+ 			# Set a magic number, will enable MJPEG but is badly documentated
+ 			self.internal.set(cv2.CAP_PROP_FOURCC, 1196444237)
+ 
++		# Request a specific V4L2 pixel format, e.g. GREY for monochrome IR sensors, and keep it raw
++		device_fourcc = self.config.get("video", "device_fourcc", fallback="")
++		if recording_plugin == "opencv" and len(device_fourcc) == 4:
++			self.internal.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*device_fourcc))
++			self.internal.set(cv2.CAP_PROP_CONVERT_RGB, 0)
++
+ 		# Set the frame width and height if requested
+ 		self.fw = self.config.getint("video", "frame_width", fallback=-1)
+ 		self.fh = self.config.getint("video", "frame_height", fallback=-1)

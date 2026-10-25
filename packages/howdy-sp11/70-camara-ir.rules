@@ -1,0 +1,2 @@
+# Surface Pro 11: el nodo de CAMSS por el que sale la cámara IR (vd55g0 → csid0 → vfe0_rdi0)
+SUBSYSTEM=="video4linux", ATTR{name}=="msm_vfe0_video0", SYMLINK+="camara-ir"

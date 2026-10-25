@@ -1,0 +1,182 @@
+From 2c127e829375e88b777a83b3cd3dd0cbbf0a14b8 Mon Sep 17 00:00:00 2001
+From: Ramón Jesús Miranda <ramonjesusmiranda@gmail.com>
+Date: Sat, 24 Oct 2026 15:43:58 +0000
+Subject: [PATCH 196/197] arm64: dts: qcom: denali: front IMX681 on C-PHY/CSIPHY2; rear on cci0/1; bus-type in the PHY endpoints
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../boot/dts/qcom/x1-microsoft-denali.dtsi    |  13 ++-
+ .../qcom/x1e80100-microsoft-denali-oled.dts   | 106 ++++++++++++++++++
+ 2 files changed, 116 insertions(+), 3 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi b/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
+index d34567f73..939b48499 100644
+--- a/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
++++ b/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
+@@ -1310,6 +1310,7 @@ &camss {
+ 
+ &camss_csiphy1_in_port {
+ 	camss_csiphy1_inep: endpoint {
++		bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+ 		data-lanes = <1 2 3 4>;
+ 		remote-endpoint = <&csiphy1_out_ep>;
+ 	};
+@@ -1323,8 +1324,13 @@ &cci1 {
+ 	status = "okay";
+ };
+ 
+-/* Trasera: OV13858 en 0x10 (SCFG_REAR: 0x20 en 8 bits; id 0xd855 en 0x300b). Bus CCI y CSIPHY por confirmar. */
+-&cci0_i2c0 {
++/*
++ * Trasera: OV13858 en 0x10 (SCFG_REAR: 0x20 en 8 bits; id 0xd855 en 0x300b),
++ * VCM en 0x0c; cci0/1 según karsies-wq/sp11-imx681-linux. CSIPHY por confirmar.
++ */
++&cci0_i2c1 {
++	clock-frequency = <400000>;
++
+ 	camera@10 {
+ 		compatible = "ovti,ov13858";
+ 		reg = <0x10>;
+@@ -1370,6 +1376,7 @@ csiphy1_in_ep: endpoint {
+ 
+ &csiphy1_out_port {
+ 	csiphy1_out_ep: endpoint {
++		bus-type = <MEDIA_BUS_TYPE_CSI2_DPHY>;
+ 		remote-endpoint = <&camss_csiphy1_inep>;
+ 	};
+ };
+@@ -1382,7 +1389,7 @@ cam_rear_default: cam-rear-default-state {
+ 		mclk-pins {
+ 			pins = "gpio97";
+ 			function = "cam_mclk";
+-			drive-strength = <2>;
++			drive-strength = <16>;
+ 			bias-disable;
+ 		};
+ 
+diff --git a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-denali-oled.dts b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-denali-oled.dts
+index a42298865..7eed55118 100644
+--- a/arch/arm64/boot/dts/qcom/x1e80100-microsoft-denali-oled.dts
++++ b/arch/arm64/boot/dts/qcom/x1e80100-microsoft-denali-oled.dts
+@@ -5,6 +5,8 @@
+ 
+ /dts-v1/;
+ 
++#include <dt-bindings/leds/common.h>
++
+ #include "hamoa.dtsi"
+ #include "x1-microsoft-denali.dtsi"
+ 
+@@ -21,3 +23,107 @@ &panel {
+ 	pinctrl-0 = <&edp_bl_en>;
+ 	pinctrl-names = "default";
+ };
++
++/*
++ * Frontal: Sony IMX681 en cci1/1 0x10, C-PHY trío 0 a 2,406 Gsím/s por CSIPHY2.
++ * Portado de ooaklee/linux_ms_dev_kit-sp11 PR #22 al modelo PHY de Linaro v18/v20.
++ */
++/ {
++	leds {
++		compatible = "gpio-leds";
++
++		pinctrl-0 = <&cam_indicator_en>;
++		pinctrl-names = "default";
++
++		privacy_led: privacy-led {
++			function = LED_FUNCTION_INDICATOR;
++			color = <LED_COLOR_ID_WHITE>;
++			gpios = <&tlmm 225 GPIO_ACTIVE_HIGH>;
++			default-state = "off";
++		};
++	};
++};
++
++&camss_csiphy2_in_port {
++	camss_csiphy2_inep: endpoint {
++		bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
++		data-lanes = <1>;
++		remote-endpoint = <&csiphy2_out_ep>;
++	};
++};
++
++&cci1_i2c1 {
++	clock-frequency = <400000>;
++
++	imx681: camera@10 {
++		compatible = "sony,imx681";
++		reg = <0x10>;
++
++		reset-gpios = <&tlmm 237 GPIO_ACTIVE_LOW>;
++		pinctrl-0 = <&cam_front_default>;
++		pinctrl-names = "default";
++
++		clocks = <&camcc CAM_CC_MCLK4_CLK>;
++		assigned-clocks = <&camcc CAM_CC_MCLK4_CLK>;
++		assigned-clock-rates = <19200000>;
++
++		avdd-supply = <&vreg_l7b_2p8>;
++		dovdd-supply = <&vreg_l3m_1p8>;
++
++		leds = <&privacy_led>;
++		led-names = "privacy";
++
++		orientation = <0>;
++		rotation = <0>;
++
++		port {
++			imx681_ep: endpoint {
++				bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
++				data-lanes = <0>;
++				/* Mitad de la tasa C-PHY observada, 2406 Msím/s. */
++				link-frequencies = /bits/ 64 <1203000000>;
++				remote-endpoint = <&csiphy2_in_ep>;
++			};
++		};
++	};
++};
++
++&csiphy2 {
++	vdda-0p9-supply = <&vreg_l2c_0p8>;
++	vdda-1p2-supply = <&vreg_l1c_1p2>;
++
++	status = "okay";
++};
++
++&csiphy2_in_port {
++	csiphy2_in_ep: endpoint {
++		bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
++		data-lanes = <0>;
++		remote-endpoint = <&imx681_ep>;
++	};
++};
++
++&csiphy2_out_port {
++	csiphy2_out_ep: endpoint {
++		bus-type = <MEDIA_BUS_TYPE_CSI2_CPHY>;
++		remote-endpoint = <&camss_csiphy2_inep>;
++	};
++};
++
++&tlmm {
++	cam_front_default: cam-front-default-state {
++		mclk4-pins {
++			pins = "gpio100";
++			function = "cam_aon";
++			drive-strength = <16>;
++			bias-disable;
++		};
++
++		reset-n-pins {
++			pins = "gpio237";
++			function = "gpio";
++			drive-strength = <2>;
++			bias-disable;
++		};
++	};
++};
+-- 
+2.43.0
+

@@ -1,0 +1,19 @@
+# Paquete local (Surface Pro 11): driver de la cámara IR ST VD55G0 (cci0 @0x60), sacado del vd55g1 del kernel 7.2.11
+# (0001-vd55g0-desde-vd55g1.patch): acepta el id 0x53354730, mono, matriz 644x604, sin parche de firmware (el binario
+# de Windows no lleva ninguno). El nodo del DT va en sp11-el2-camara-ir.dtso (paquete sp11-el2). 24-10-2026
+# pkgrel 2: ruta propia del G0 (FSM en 0x2c, contexto en 0x044c, secuencia de Windows), 644x604 a 63 fps, y registro
+# con v4l2_async_register_subdev_sensor para que V4L2 encienda el emisor IR (LED «privacy» del DT) al emitir.
+pkgname=vd55g0-dkms
+pkgver=7.2.11
+pkgrel=2
+pkgdesc="Driver de la cámara IR VD55G0 de la Surface Pro 11 (DKMS)"
+arch=("any")
+license=("GPL-2.0-only")
+depends=("dkms")
+source=("vd55g0.c" "Makefile" "dkms.conf" "0001-vd55g0-desde-vd55g1.patch")
+sha256sums=("SKIP" "SKIP" "SKIP" "SKIP")
+package() {
+  local d="$pkgdir/usr/src/vd55g0-$pkgver"
+  install -Dm644 vd55g0.c Makefile -t "$d"
+  sed "s/@PKGVER@/$pkgver/" dkms.conf > "$d/dkms.conf"
+}

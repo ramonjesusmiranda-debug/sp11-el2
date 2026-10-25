@@ -1,10 +1,12 @@
-# Surface Pro 11 (X1E80100, OLED) at EL2: audio, NPU, keyboard backlight and deep s2idle
+# Surface Pro 11 (X1E80100, OLED) at EL2: audio, NPU, video decoding, cameras, keyboard backlight and deep s2idle
 
 Arch Linux on a Surface Pro 11 booted at EL2 with [slbounce](https://github.com/TravMurav/slbounce),
 stable, with the ADSP and CDSP started by Linux ([x1e-dsp](https://github.com/justririll/x1e-dsp)),
-working audio, RTC, Surface Pro Flex keyboard backlight and s2idle reaching **CXSD + AOSD + DDR LPM for 99.9 % of a 73 min suspend
+working audio, RTC, Iris hardware video decoding, the three cameras (front, rear and IR with Howdy), Surface Pro Flex
+keyboard backlight and s2idle reaching **CXSD + AOSD + DDR LPM for 99.9 % of a 73 min suspend
 (~0.26 W, was 1.06 W at EL1)**, no hourly reset. Tested on one unit (X1E80100, OLED, UEFI 175.222.235),
-October 2026 (updated 23 October: CDSP generic firmware fix, DPU/PCIe/USB fixes, Surface Pro Flex keyboard backlight). Base kernel: [dwhinham/linux-sp11](https://github.com/dwhinham/linux-sp11) 7.2.8 (`616a9f2`).
+October 2026 (updated 25 October: Iris at EL2, cameras, Firefox hardware decoding, pmic_glink sleep fix; 23 October: CDSP
+generic firmware fix, DPU/PCIe/USB fixes, keyboard backlight). Base kernel: [dwhinham/linux-sp11](https://github.com/dwhinham/linux-sp11) 7.2.11 (`d6333a4`).
 Use at your own risk.
 
 | Setup | Audio | NPU | s2idle |
@@ -39,8 +41,8 @@ Use at your own risk.
    `/sys/kernel/debug/clk/<clk>/clk_enable_count` instead.
 6. **RTC / EFI variables at EL2** (patches 128–129, SHM bridge self-owner): without them `qseecom` fails (-22),
    so no efivars and `rtc-pm8xxx` defers forever. With them `rtc0` works (no wake alarm: `qcom,no-alarm`).
-7. **Audio silent in apps at EL2 (WirePlumber):** Iris fails to start at EL2 and opening `/dev/video0` returns
-   ENOMEM; WirePlumber's V4L2 monitor then leaves its async event queue stuck, so the sound card never gets its
+7. **Audio silent in apps at EL2 (WirePlumber):** before patch 177, Iris failed to start at EL2 and opening
+   `/dev/video0` returned ENOMEM; WirePlumber's V4L2 monitor then leaves its async event queue stuck, so the sound card never gets its
    profile, ports or links — with nothing in the log. Disabling `monitor.v4l2`/`monitor.libcamera`
    (`packages/sp11-el2/90-sp11-wireplumber-sin-video.conf`) fixes it.
 8. **x1e-dsp on the SP11:** SoC HW version `0xa0090201` and the ADSP DTB descriptor (`0x0088022b`, `0x201`,
@@ -69,8 +71,14 @@ Use at your own risk.
     ~33 s after boot in **8/13 boots (61.5 %)**. Switching `remoteproc_cdsp` via DT overlay (`sp11-el2-cdsp-generico.dtso`,
     suggested by `@mmediouni`) to the generic upstream `qcom/x1e80100/cdsp.mbn` (`CDSP.HT.2.9.c1-00094` from `linux-firmware`)
     resulted in **0/15 crashes (0.0 %)** with `fastrpc` and deep s2idle working normally.
-14. **Iris (video) at EL2 does not work yet** (`kernel-patches/experimental-iris-el2/`, do not use as is; `qcom_iris`
-    is blacklisted by `sp11-el2-blacklist.conf` to avoid boot log noise).
+14. **Iris (video decoding) at EL2 works (patch 177).** At EL2 TZ authenticates the Iris firmware (PAS 9) but does
+    not handle `MEM_PROTECT_VIDEO_VAR` / `SET_REMOTE_STATE`: on Windows the CSRT routes them to QcSkExt8380 in VTL1,
+    which programs the VPU memory windows and releases its reset. Patch 177 does the same from the driver (own
+    `video-firmware` context bank, PAS load + IOMMU mapping, FW/CPA/non-pixel windows, SEC_SID, fuses by SMC, VPU
+    CPU out of reset; resume repeats the boot). Results with `ffmpeg -c:v *_v4l2m2m` against software decoding,
+    frame by frame: H.264 300/300, HEVC and VP9 identical, AV1 149/150 (the first frame is lost). 8 h of s2idle with
+    `qcom_iris` loaded, decoding still fine afterwards. The old attempt in `experimental-iris-el2/` is superseded and
+    the blacklist is gone.
 15. **Surface Pro Keyboard (`045E:09AE`) backlight (patch 176):**
     The Surface Pro Keyboard exposes its backlight over SSAM HID (`0019:045E:09AE`, Consumer Page `0x0c` Usage `0x07`;
     sibling `0019:045E:09B0` is the Slim Pen charging cradle):
@@ -84,6 +92,36 @@ Use at your own risk.
     Adds the `gic-mem` (`MASTER_GIC1 -> SLAVE_EBI1`, 1 kB/s) interconnect path from [@aruhier](https://github.com/aruhier)
     so `ath12k` MSI interrupts are not lost when the display is off and DDR drops to idle, while capping `opp-peak-kBps`
     on `pcie-mem` to `250000 kB/s` so active PCIe links do not pin DDR at 2092 MHz at idle.
+
+17. **Cameras (patches 180–198, `libcamera-sp11`, `vd55g0-dkms`, `howdy-sp11`):** front Sony IMX681 on C-PHY
+    (CSIPHY2, trio 0, 2.406 Gsym/s), rear OV13858 on D-PHY (CSIPHY1) and the IR ST VD55G0 (CSIPHY0). Base: Linaro's
+    CSI2 PHY v18 + camss v20 + x1e80100 CCI/CAMSS dtsi (Bryan O'Donoghue) and the IMX681 parts of
+    ooaklee/linux_ms_dev_kit-sp11 PR #22, with C-PHY ported to the v18 PHY driver. Front and rear give 30.0 fps in
+    `cam`; full resolution (4216×3136 rear, 3832×2640 front) needs `cma=512M` (set by `sp11-el2`). Patch 198:
+    regulator voltages that are not a valid LDO step (l16b, l2m) took PMIC B down, and the WiFi with it.
+    libcamera 0.7.2 needs the IMX681 helper (`libcamera-sp11`). The VD55G0 has a vd55g1-like register map with the
+    context block at 0x044c and the FSM at 0x2c; `vd55g0-dkms` gives 644×604 Y8 at 63 fps, and the overlay
+    `sp11-el2-camara-ir.dtso` drives the IR emitter (PM8550 flash channels 1 and 4) and the privacy LED. Howdy with
+    manual exposure unlocks in 0.85 s (3/3).
+18. **Firefox hardware decoding with Iris (`packages/ffmpeg-v4l2drm`):** Firefox opens `h264_v4l2m2m` but needs
+    `AV_PIX_FMT_DRM_PRIME`, which upstream FFmpeg 9.0 does not output, so it fell back to software. The package is
+    Arch ARM's FFmpeg 9.0.2 + the LibreELEC `v4l2-drmprime` series + two fixes on top of it:
+    - `0003`: Firefox sets neither `pkt_timebase` nor `time_base`, so every frame came out with `AV_NOPTS_VALUE` and
+      Firefox painted ~10 of 30 fps; it now falls back to the V4L2 microsecond timebase.
+    - `0004`: when a looping video goes back to the start (the series' `flush` + seek), Iris raises a source change
+      with the same format; `DECODER_CMD START` was sent before the LAST capture buffer was dequeued, Iris refuses it
+      with EBUSY and the decoder stayed silent. It is now resent when the LAST buffer arrives. Drain + flush + seek
+      test: 300/1/1 frames before, 300/300/300 after. Upstream FFmpeg without the series has no `flush` in v4l2m2m
+      and does not reach this path.
+    The import is zero-copy, but CPU use does not drop yet (H.264 ~60 % vs 62–72 % in software, HEVC ~76 % vs ~55 %,
+    the extra in Firefox's main process, not profiled yet). mpv with v4l2m2m is the efficient path for now.
+19. **USB-C hub across suspend (patch 199):** during a suspend `ps883x_retimer` failed to write over i2c with the
+    controller asleep (`-13`, `pmic_glink_altmode: failed to setup retimer`), and connecting a hub afterwards made
+    `xhci-hcd` die ("HC died") ~6 s after enumeration. Patch 199 is 1/4 of tvlad744's RFC "pmic_glink: hold back
+    notifications over system sleep". With it a hub (Realtek + r8153) works from a cold boot; across suspend it is not
+    verified yet.
+20. **Slim Pen 2:** pairs over Bluetooth LE; BlueZ exposes its Battery Service only while the pen is connected
+    (KDE's Bluetooth settings show the percentage then; UPower does not list it while idle).
 
 ## Contents
 
@@ -106,10 +144,17 @@ Use at your own risk.
   - `170`–`174`: PCIe OPP tables + `gic-mem` vote (capped at 250 MB/s), WCN7850 LTR quirk, `t-power-on-us`
   - `175`: `nvme.quirks` built-in boot hang fix (`device_param_cb`, Maurizio Lombardi)
   - `176`: Surface Pro Flex Keyboard (`045E:09AE`) backlight LED class (`surface::kbd_backlight`) and SAM BAT `0x1a` event (this work)
-  - `experimental-iris-el2/`: 152-158, Iris at EL2 attempt (finding 14) — not in the PKGBUILD
+  - `177`: Iris VPU boot at EL2 (this work, finding 14)
+  - `180`–`192`: CSI2 C-PHY/D-PHY driver v18, phy core helpers, camss PHY API, x1e80100 CCI/CAMSS (Bryan O'Donoghue, Linaro)
+  - `193`–`198`: SP11 camera DT, IMX681 (ooaklee PR #22), X1E C-PHY, ov13858 OF support, LDO voltages (this work)
+  - `199`: pmic_glink hold back notifications over system sleep, 1/4 of the RFC (Vladyslav Tymoshchuk)
+  - `experimental-iris-el2/`: 152-158, old Iris attempt — superseded by 177, not in the PKGBUILD
 - `packages/sp11-el2` — builds `/boot/sl/el2-dsp.efi` (main: ADSP+CDSP by Linux with generic CDSP firmware) and `/boot/sl/el2.efi`
   (UEFI-left ADSP attached, no audio) from the kernel's EL2 DTB + overlays; systemd-boot entries through the UEFI
   shell (`*.nsh` find slbounce on fs0..fs9); sleep hook; module service; WirePlumber and UCM drop-ins.
+- `packages/ffmpeg-v4l2drm` — FFmpeg 9.0.2 with DRM_PRIME output for Firefox (finding 18).
+- `packages/libcamera-sp11`, `packages/vd55g0-dkms`, `packages/howdy-sp11` — cameras and face unlock (finding 17;
+  Howdy also needs `python-dlib` from the AUR).
 - `packages/x1e-sleep-modulos-dkms` — `el1tmr`, `aoss_cxsd_only`, `qcom_adsp_pwr_lmts`, `asus_adsp_sleepstate`
   from justririll/x1e-sleep, as DKMS for `-sp11-el2` kernels.
 

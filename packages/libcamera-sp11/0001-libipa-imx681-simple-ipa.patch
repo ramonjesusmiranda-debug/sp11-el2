@@ -1,0 +1,92 @@
+Description: Add standalone Sony IMX681 support to libcamera Simple IPA
+ The standalone SP11 kernel driver exposes Sony's reciprocal analogue-gain
+ code in the range 0..960. Add the corresponding sensor helper, the measured
+ unit-cell/control-delay metadata, and conservative model-named tuning with
+ the hardware-measured 64-code RAW10 black pedestal. Leave colour correction
+ disabled until a controlled chart measurement establishes a real matrix.
+Origin: other, https://github.com/turbineBMW/surface-pro-11-linux/tree/main/userspace/libcamera
+Forwarded: no
+Last-Update: 2026-08-29
+---
+diff --git a/src/libcamera/sensor/camera_sensor_properties.cpp b/src/libcamera/sensor/camera_sensor_properties.cpp
+index b217363..47900e0 100644
+--- a/src/libcamera/sensor/camera_sensor_properties.cpp
++++ b/src/libcamera/sensor/camera_sensor_properties.cpp
+@@ -309,6 +309,16 @@ const CameraSensorProperties *CameraSensorProperties::get(const std::string &sen
+ 				.hblankDelay = 3
+ 			},
+ 		} },
++		{ "imx681", {
++			.unitCellSize = { 1000, 1000 },
++			.testPatternModes = {},
++			.sensorDelays = {
++				.exposureDelay = 2,
++				.gainDelay = 2,
++				.vblankDelay = 2,
++				.hblankDelay = 2
++			},
++		} },
+ 		{ "imx708", {
+ 			.unitCellSize = { 1400, 1400 },
+ 			.testPatternModes = {
+diff --git a/src/ipa/libipa/camera_sensor_helper.cpp b/src/ipa/libipa/camera_sensor_helper.cpp
+index e3e3e53..2fd9cb5 100644
+--- a/src/ipa/libipa/camera_sensor_helper.cpp
++++ b/src/ipa/libipa/camera_sensor_helper.cpp
+@@ -642,6 +642,18 @@ public:
+ };
+ REGISTER_CAMERA_SENSOR_HELPER("imx477", CameraSensorHelperImx477)
+ 
++class CameraSensorHelperImx681 : public CameraSensorHelper
++{
++public:
++	CameraSensorHelperImx681()
++	{
++		/* The black pedestal is 64 at 10 bits. */
++		blackLevel_ = 4096;
++		gain_ = AnalogueGainLinear{ 0, 1024, -1, 1024 };
++	}
++};
++REGISTER_CAMERA_SENSOR_HELPER("imx681", CameraSensorHelperImx681)
++
+ class CameraSensorHelperImx708 : public CameraSensorHelper
+ {
+ public:
+diff --git a/src/ipa/simple/data/imx681.yaml b/src/ipa/simple/data/imx681.yaml
+new file mode 100644
+index 0000000..f2bfac6
+--- /dev/null
++++ b/src/ipa/simple/data/imx681.yaml
+@@ -0,0 +1,16 @@
++# SPDX-License-Identifier: CC0-1.0
++# SPDX-FileCopyrightText: 2026 turbinebmw
++%YAML 1.1
++---
++version: 1
++algorithms:
++  # The measured black pedestal is 64 at 10 bits. Simple IPA tuning values use
++  # libcamera's 16-bit scale, where 64 << 6 is 4096.
++  - BlackLevel:
++      blackLevel: 4096
++  - Awb:
++  # A color correction matrix must be measured from a controlled chart before
++  # enabling Ccm. The generic identity matrix is not a calibration.
++  - Adjust:
++  - Agc:
++...
+diff --git a/src/ipa/simple/data/meson.build b/src/ipa/simple/data/meson.build
+index 92795ee..df76092 100644
+--- a/src/ipa/simple/data/meson.build
++++ b/src/ipa/simple/data/meson.build
+@@ -1,10 +1,11 @@
+ # SPDX-License-Identifier: CC0-1.0
+ 
+ conf_files = files([
++    'imx681.yaml',
+     'uncalibrated.yaml',
+ ])
+ 
+ # The install_dir must match the name from the IPAModuleInfo
+ install_data(conf_files,
+              install_dir : ipa_data_dir / 'simple',
+              install_tag : 'runtime')

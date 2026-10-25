@@ -1,0 +1,16 @@
+--- a/libavcodec/v4l2_buffers.c	2026-10-25 13:13:02.202285820 +0100
++++ b/libavcodec/v4l2_buffers.c	2026-10-25 13:13:02.203369227 +0100
+@@ -61,7 +61,12 @@
+ 
+     if (s->avctx->pkt_timebase.num)
+         return s->avctx->pkt_timebase;
+-    return s->avctx->time_base;
++    if (s->avctx->time_base.num)
++        return s->avctx->time_base;
++    /* Neither is set (e.g. Firefox): pass timestamps through unscaled
++     * instead of rescaling by 0/1, which turns every pts into
++     * AV_NOPTS_VALUE. */
++    return v4l2_timebase;
+ }
+ 
+ static inline void v4l2_set_pts(V4L2Buffer *out, int64_t pts)

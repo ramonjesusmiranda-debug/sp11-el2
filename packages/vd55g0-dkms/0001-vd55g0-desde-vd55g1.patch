@@ -1,0 +1,334 @@
+--- a/drivers/media/i2c/vd55g1.c
++++ b/drivers/media/i2c/vd55g0.c
+@@ -31,12 +31,17 @@
+ #define VD55G1_REG_MODEL_ID				CCI_REG32_LE(0x0000)
+ #define VD55G1_MODEL_ID_VD55G1				0x53354731 /* Mono */
+ #define VD55G1_MODEL_ID_VD65G4				0x53354733 /* RGB */
++/* Surface Pro 11 (24-10-2026): VD55G0, IR mono 640x600 (+2 px de borde), sin parche de firmware */
++#define VD55G1_MODEL_ID_VD55G0				0x53354730 /* Mono */
++#define VD55G1_IS_MONO(id)	((id) != VD55G1_MODEL_ID_VD65G4)
++#define VD55G1_IS_G0(sensor)	((sensor)->id == VD55G1_MODEL_ID_VD55G0)
+ #define VD55G1_REG_REVISION				CCI_REG16_LE(0x0004)
+ #define VD55G1_REVISION_CCB				0x2020
+ #define VD55G1_REVISION_BAYER				0x3030
+ #define VD55G1_REG_FWPATCH_REVISION			CCI_REG16_LE(0x0012)
+ #define VD55G1_REG_FWPATCH_START_ADDR			CCI_REG8(0x2000)
+-#define VD55G1_REG_SYSTEM_FSM				CCI_REG8(0x001c)
++/* El VD55G0 tiene la FSM en 0x2c (medido 24-10: 0x1c vale 0x12 tras el reset) */
++#define VD55G1_REG_SYSTEM_FSM				CCI_REG8(0x002c)
+ #define VD55G1_SYSTEM_FSM_READY_TO_BOOT			0x01
+ #define VD55G1_SYSTEM_FSM_SW_STBY			0x02
+ #define VD55G1_SYSTEM_FSM_STREAMING			0x03
+@@ -115,8 +120,25 @@
+ #define VD55G1_REG_EXPOSURE_INSTANCE(ctx) \
+ 	CCI_REG32_LE(0x52D + VD55G1_CTX_OFFSET * (ctx))
+ 
+-#define VD55G1_WIDTH					804
+-#define VD55G1_HEIGHT					704
++/*
++ * VD55G0: mapa sacado de la secuencia de Windows (Chromatix de CamX,
++ * com.surface.sensormodule.aux_vd55g0_MSHW0492.bin). Hasta 0x0300 coincide con
++ * el vd55g1; el bloque de contexto está en 0x044c en vez de 0x0500.
++ */
++#define VD55G0_REG_STATUS				CCI_REG8(0x0020)
++#define VD55G0_REG_PATGEN_CTRL				CCI_REG16_LE(0x0400)
++#define VD55G0_REG_0416					CCI_REG8(0x0416)
++#define VD55G0_REG_GROUP_HOLD				CCI_REG8(0x0448)
++#define VD55G0_REG_EXP_MODE				CCI_REG8(0x044c)
++#define VD55G0_REG_MANUAL_ANALOG_GAIN			CCI_REG8(0x044d)
++#define VD55G0_REG_MANUAL_COARSE_EXPOSURE		CCI_REG16_LE(0x044e)
++#define VD55G0_REG_MANUAL_DIGITAL_GAIN			CCI_REG16_LE(0x0450)
++#define VD55G0_REG_FRAME_LENGTH				CCI_REG16_LE(0x0458)
++#define VD55G0_LINE_LENGTH				1200
++#define VD55G0_FRAME_LENGTH_DEF				1955
++
++#define VD55G1_WIDTH					644
++#define VD55G1_HEIGHT					604
+ #define VD55G1_MODE_IDX_DEF				0
+ #define VD55G1_NB_GPIOS					4
+ #define VD55G1_DGAIN_DEF				256
+@@ -138,7 +160,7 @@
+ #define VD55G1_MIPI_RATE_MAX				(1200 * MEGA)
+ 
+ #define VD55G1_MODEL_ID_NAME(id) \
+-	((id) == VD55G1_MODEL_ID_VD55G1 ? "vd55g1" : "vd65g4")
++	((id) == VD55G1_MODEL_ID_VD55G1 ? "vd55g1" : (id) == VD55G1_MODEL_ID_VD55G0 ? "vd55g0" : "vd65g4")
+ 
+ static const u8 vd55g1_patch_array[] = {
+ 	0x44, 0x03, 0x09, 0x02, 0xe6, 0x01, 0x42, 0x00, 0xea, 0x01, 0x42, 0x00,
+@@ -500,22 +522,6 @@
+ 		.width = VD55G1_WIDTH,
+ 		.height = VD55G1_HEIGHT,
+ 	},
+-	{
+-		.width = 800,
+-		.height = VD55G1_HEIGHT,
+-	},
+-	{
+-		.width = 800,
+-		.height = 600,
+-	},
+-	{
+-		.width = 640,
+-		.height = 480,
+-	},
+-	{
+-		.width = 320,
+-		.height = 240,
+-	},
+ };
+ 
+ enum vd55g1_expo_state {
+@@ -627,7 +633,7 @@
+ {
+ 	unsigned int i, j;
+ 
+-	if (sensor->id == VD55G1_MODEL_ID_VD55G1)
++	if (VD55G1_IS_MONO(sensor->id))
+ 		return code;
+ 
+ 	for (i = 0; i < ARRAY_SIZE(vd55g1_mbus_formats_bayer); i++) {
+@@ -673,6 +679,10 @@
+ 	mipi_req_line_length = mipi_req_line_time * sensor->pixel_clock /
+ 			       HZ_PER_MHZ;
+ 
++	/* VD55G0: longitud de línea fija, la de Windows */
++	if (VD55G1_IS_G0(sensor))
++		return VD55G0_LINE_LENGTH - crop->width;
++
+ 	/* Absolute time required for ADCs to convert pixels */
+ 	min_line_length = VD55G1_LINE_LENGTH_MIN;
+ 	if (sensor->hdr_ctrl->val == VD55G1_HDR_SUB)
+@@ -689,7 +699,8 @@
+ 				     struct vd55g1_vblank_limits *limits)
+ {
+ 	limits->min = VD55G1_VBLANK_MIN;
+-	limits->def = VD55G1_FRAME_LENGTH_DEF - crop->height;
++	limits->def = (VD55G1_IS_G0(sensor) ? VD55G0_FRAME_LENGTH_DEF :
++		       VD55G1_FRAME_LENGTH_DEF) - crop->height;
+ 	limits->max = VD55G1_VBLANK_MAX - crop->height;
+ }
+ 
+@@ -1090,6 +1101,78 @@
+ 	v4l2_ctrl_grab(sensor->hdr_ctrl, enable);
+ }
+ 
++/* VD55G0: escrituras de Windows tras el arranque (salvo reloj y MIPI, que pone el driver) */
++static const struct cci_reg_sequence vd55g0_init_regs[] = {
++	{ CCI_REG16_LE(0x0300), VD55G0_LINE_LENGTH },
++	{ CCI_REG16_LE(0x0302), 0x0000 },
++	{ VD55G0_REG_0416, 0x40 },
++	{ CCI_REG8(0x0467), 0x01 },
++	{ CCI_REG8(0x0468), 0x02 },
++	{ CCI_REG8(0x0469), 0x01 },
++	{ CCI_REG8(0x046a), 0x01 },
++	{ CCI_REG8(0x046d), 0x00 },
++	{ CCI_REG8(0x046e), 0x00 },
++	{ CCI_REG32_LE(0x0476), 0x00000000 },
++	/* ventana: matriz completa 644x604 (inicio y fin incluidos) */
++	{ CCI_REG16_LE(0x045e), 0 },
++	{ CCI_REG16_LE(0x0460), VD55G1_WIDTH - 1 },
++	{ CCI_REG16_LE(0x0462), 0 },
++	{ CCI_REG16_LE(0x0464), VD55G1_HEIGHT - 1 },
++	{ CCI_REG16_LE(0x045a), 0 },
++	{ CCI_REG16_LE(0x045c), VD55G1_HEIGHT - 1 },
++};
++
++static int vd55g0_update_patgen(struct vd55g1 *sensor, u32 patgen_index)
++{
++	/* Valores de testPatternData de Windows: 0x0001, 0x0081, 0x0101 */
++	static const u16 index2val[] = { 0x0000, 0x0081, 0x0101 };
++
++	BUILD_BUG_ON(ARRAY_SIZE(index2val) != ARRAY_SIZE(vd55g1_tp_menu));
++
++	return vd55g1_write(sensor, VD55G0_REG_PATGEN_CTRL,
++			    index2val[patgen_index], NULL);
++}
++
++static int vd55g0_update_expo_cluster(struct vd55g1 *sensor, bool is_auto)
++{
++	int ret = 0;
++
++	/* Windows agrupa los cambios de exposición con 0x0448 = 1 ... 0 */
++	vd55g1_write(sensor, VD55G0_REG_GROUP_HOLD, 1, &ret);
++	vd55g1_write(sensor, VD55G0_REG_EXP_MODE,
++		     is_auto ? VD55G1_EXP_AUTO : VD55G1_EXP_MANUAL, &ret);
++	if (!is_auto) {
++		vd55g1_write(sensor, VD55G0_REG_MANUAL_COARSE_EXPOSURE,
++			     sensor->expo_ctrl->val, &ret);
++		vd55g1_write(sensor, VD55G0_REG_MANUAL_ANALOG_GAIN,
++			     sensor->again_ctrl->val, &ret);
++		vd55g1_write(sensor, VD55G0_REG_MANUAL_DIGITAL_GAIN,
++			     sensor->dgain_ctrl->val, &ret);
++	}
++	vd55g1_write(sensor, VD55G0_REG_GROUP_HOLD, 0, &ret);
++
++	return ret;
++}
++
++static int vd55g0_configure(struct vd55g1 *sensor,
++			    struct v4l2_mbus_framefmt *format)
++{
++	int ret = 0;
++
++	/* Windows deja el formato por defecto (RAW10, DT 0x2b); aquí, el pedido */
++	vd55g1_write(sensor, VD55G1_REG_MIPI_DATA_RATE, sensor->mipi_rate,
++		     &ret);
++	vd55g1_write(sensor, VD55G1_REG_OIF_CTRL, sensor->oif_ctrl, &ret);
++	vd55g1_write(sensor, VD55G1_REG_FORMAT_CTRL,
++		     vd55g1_get_fmt_bpp(format->code), &ret);
++	vd55g1_write(sensor, VD55G1_REG_OIF_IMG_CTRL,
++		     vd55g1_get_fmt_data_type(format->code), &ret);
++	cci_multi_reg_write(sensor->regmap, vd55g0_init_regs,
++			    ARRAY_SIZE(vd55g0_init_regs), &ret);
++
++	return ret;
++}
++
+ static int vd55g1_enable_streams(struct v4l2_subdev *sd,
+ 				 struct v4l2_subdev_state *state, u32 pad,
+ 				 u64 streams_mask)
+@@ -1105,6 +1188,15 @@
+ 	if (ret < 0)
+ 		return ret;
+ 
++	if (VD55G1_IS_G0(sensor)) {
++		ret = vd55g0_configure(sensor, format);
++		if (!ret)
++			ret = __v4l2_ctrl_handler_setup(&sensor->ctrl_handler);
++		if (ret)
++			goto err_rpm_put;
++		goto start_stream;
++	}
++
+ 	/* Configure output */
+ 	vd55g1_write(sensor, VD55G1_REG_MIPI_DATA_RATE,
+ 		     sensor->mipi_rate, &ret);
+@@ -1136,6 +1228,7 @@
+ 	if (ret)
+ 		goto err_rpm_put;
+ 
++start_stream:
+ 	/* Start streaming */
+ 	vd55g1_write(sensor, VD55G1_REG_STBY, VD55G1_STBY_START_STREAM, &ret);
+ 	vd55g1_poll_reg(sensor, VD55G1_REG_STBY, 0, &ret);
+@@ -1160,7 +1253,8 @@
+ 	int ret = 0;
+ 
+ 	/* Retrieve Expo cluster to enable coldstart of AE */
+-	ret = vd55g1_read_expo_cluster(sensor);
++	if (!VD55G1_IS_G0(sensor))
++		ret = vd55g1_read_expo_cluster(sensor);
+ 
+ 	vd55g1_write(sensor, VD55G1_REG_STREAMING, VD55G1_STREAMING_STOP_STREAM,
+ 		     &ret);
+@@ -1255,7 +1349,7 @@
+ 	struct vd55g1 *sensor = to_vd55g1(sd);
+ 	u32 base_code;
+ 
+-	if (sensor->id == VD55G1_MODEL_ID_VD55G1) {
++	if (VD55G1_IS_MONO(sensor->id)) {
+ 		if (code->index >= ARRAY_SIZE(vd55g1_mbus_formats_mono))
+ 			return -EINVAL;
+ 		base_code = vd55g1_mbus_formats_mono[code->index];
+@@ -1371,7 +1465,7 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	if (sensor->id == VD55G1_MODEL_ID_VD55G1)
++	if (VD55G1_IS_MONO(sensor->id))
+ 		code = vd55g1_mbus_formats_mono[0];
+ 	else
+ 		code = vd55g1_mbus_formats_bayer[0][0];
+@@ -1432,6 +1526,10 @@
+ 	struct vd55g1 *sensor = ctrl_to_vd55g1(ctrl);
+ 	int ret = 0;
+ 
++	/* VD55G0: no sabemos dónde lee la exposición aplicada */
++	if (VD55G1_IS_G0(sensor))
++		return 0;
++
+ 	/* Interact with HW only when it is powered ON */
+ 	if (!pm_runtime_get_if_in_use(sensor->dev))
+ 		return 0;
+@@ -1502,6 +1600,32 @@
+ 	if (!pm_runtime_get_if_in_use(sensor->dev))
+ 		return 0;
+ 
++	if (VD55G1_IS_G0(sensor)) {
++		switch (ctrl->id) {
++		case V4L2_CID_HFLIP:
++			ret = vd55g1_write(sensor, VD55G1_REG_ORIENTATION,
++					   sensor->hflip_ctrl->val |
++						   (sensor->vflip_ctrl->val << 1),
++					   NULL);
++			break;
++		case V4L2_CID_TEST_PATTERN:
++			ret = vd55g0_update_patgen(sensor, ctrl->val);
++			break;
++		case V4L2_CID_EXPOSURE_AUTO:
++			ret = vd55g0_update_expo_cluster(sensor, is_auto);
++			break;
++		case V4L2_CID_VBLANK:
++			ret = vd55g1_write(sensor, VD55G0_REG_FRAME_LENGTH,
++					   frame_length, NULL);
++			break;
++		default:
++			/* bloqueo, sesgo de AE, HDR y LED: sin mapear en el G0 */
++			break;
++		}
++		pm_runtime_put_autosuspend(sensor->dev);
++		return ret;
++	}
++
+ 	switch (ctrl->id) {
+ 	case V4L2_CID_HFLIP:
+ 		ret = vd55g1_write(sensor, VD55G1_REG_ORIENTATION,
+@@ -1668,7 +1792,9 @@
+ 	if (ret)
+ 		return ret;
+ 
+-	if (id != VD55G1_MODEL_ID_VD55G1 && id != VD55G1_MODEL_ID_VD65G4) {
++	dev_info(sensor->dev, "model id 0x%08x\n", (u32)id);
++	if (id != VD55G1_MODEL_ID_VD55G1 && id != VD55G1_MODEL_ID_VD65G4 &&
++	    id != VD55G1_MODEL_ID_VD55G0) {
+ 		dev_warn(sensor->dev, "Unsupported sensor id 0x%x\n",
+ 			 (u32)id);
+ 		return -ENODEV;
+@@ -1683,6 +1809,7 @@
+ 	ret = vd55g1_read(sensor, VD55G1_REG_REVISION, &rev, NULL);
+ 	if (ret)
+ 		return ret;
++	dev_info(sensor->dev, "revision 0x%04x\n", (u16)rev);
+ 
+ 	if ((id == VD55G1_MODEL_ID_VD55G1 && rev != VD55G1_REVISION_CCB) &&
+ 	    (id == VD55G1_MODEL_ID_VD65G4 && rev != VD55G1_REVISION_BAYER)) {
+@@ -2013,7 +2140,8 @@
+ 		goto err_power_off;
+ 	}
+ 
+-	ret = v4l2_async_register_subdev(&sensor->sd);
++	/* _sensor: recoge el LED «privacy» del DT, que en la SP11 es el emisor IR */
++	ret = v4l2_async_register_subdev_sensor(&sensor->sd);
+ 	if (ret) {
+ 		dev_err(dev, "async subdev register failed %d\n", ret);
+ 		goto err_subdev;
+@@ -2047,8 +2175,7 @@
+ }
+ 
+ static const struct of_device_id vd55g1_dt_ids[] = {
+-	{ .compatible = "st,vd55g1", .data = (void *)VD55G1_MODEL_ID_VD55G1 },
+-	{ .compatible = "st,vd65g4", .data = (void *)VD55G1_MODEL_ID_VD65G4 },
++	{ .compatible = "st,vd55g0", .data = (void *)VD55G1_MODEL_ID_VD55G0 },
+ 	{ /* sentinel */ }
+ };
+ MODULE_DEVICE_TABLE(of, vd55g1_dt_ids);
+@@ -2059,7 +2186,7 @@
+ 
+ static struct i2c_driver vd55g1_i2c_driver = {
+ 	.driver = {
+-		.name  = "vd55g1",
++		.name  = "vd55g0",
+ 		.of_match_table = vd55g1_dt_ids,
+ 		.pm = &vd55g1_pm_ops,
+ 	},

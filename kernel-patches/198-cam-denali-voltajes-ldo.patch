@@ -1,0 +1,41 @@
+From a7c64f64728d22e58d79f30666ccc942cdaf04fe Mon Sep 17 00:00:00 2001
+From: Ramón Jesús Miranda <ramonjesusmiranda@gmail.com>
+Date: Sat, 24 Oct 2026 16:25:15 +0000
+Subject: [PATCH] arm64: dts: qcom: denali: l16b 2.904 V and l2m 1.152 V (valid LDO steps)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi b/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
+index 939b48499..c6eae2ed5 100644
+--- a/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
++++ b/arch/arm64/boot/dts/qcom/x1-microsoft-denali.dtsi
+@@ -590,8 +590,8 @@ vreg_l15b_1p8: ldo15 {
+ 		/* VCM de la cámara trasera (Windows: LDO16_B 2,9 V) */
+ 		vreg_l16b_2p9: ldo16 {
+ 			regulator-name = "vreg_l16b_2p9";
+-			regulator-min-microvolt = <2900000>;
+-			regulator-max-microvolt = <2900000>;
++			regulator-min-microvolt = <2904000>;
++			regulator-max-microvolt = <2904000>;
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
+@@ -776,8 +776,8 @@ vreg_l1m_1p2: ldo1 {
+ 
+ 		vreg_l2m_1p15: ldo2 {
+ 			regulator-name = "vreg_l2m_1p15";
+-			regulator-min-microvolt = <1150000>;
+-			regulator-max-microvolt = <1150000>;
++			regulator-min-microvolt = <1152000>;
++			regulator-max-microvolt = <1152000>;
+ 			regulator-initial-mode = <RPMH_REGULATOR_MODE_HPM>;
+ 		};
+ 
+-- 
+2.43.0
+

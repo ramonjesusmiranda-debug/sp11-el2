@@ -1,0 +1,34 @@
+#!/bin/bash
+# Surface Pro 11: deja montada la ruta de medios de la cámara IR (vd55g0 → csiphy0 → csid0 → vfe0_rdi0 → video0)
+# antes de que Howdy abra /dev/camara-ir. libcamera la deshace al usar otra cámara, así que se rehace cada vez.
+# También fija una exposición manual: la automática del sensor mide la habitación entera y quema la cara, que está
+# cerca y con el emisor (medido 24-10: cara saturada; con 1600 líneas y ganancia digital 1024, cara en 35/35 fotogramas,
+# media 80 y 0,4 % saturado). Se puede cambiar en /etc/default/howdy-sp11 (IR_EXPOSICION, IR_GANANCIA_DIGITAL).
+set -e
+IR_EXPOSICION=1600
+IR_GANANCIA_DIGITAL=1024
+[ -r /etc/default/howdy-sp11 ] && . /etc/default/howdy-sp11
+S="vd55g0 4-0060"
+F="Y8_1X8/644x604"
+for m in /dev/media*; do
+	media-ctl -d "$m" -p 2>/dev/null | grep -q "entity.*: $S " && M=$m && break
+done
+[ -n "$M" ] || { echo "preparar-ir: no encuentro el sensor $S" >&2; exit 1; }
+mc() { media-ctl -d "$M" "$@"; }
+# csid0 solo admite un enlace de entrada: se apagan los de los demás csiphy y luego se enciende el de la IR
+for p in $(mc -p | sed -n 's/^- entity [0-9]*: \(msm_csiphy[0-9]*\) .*/\1/p'); do
+	[ "$p" = msm_csiphy0 ] || mc -l "\"$p\":1->\"msm_csid0\":0[0]" >/dev/null 2>&1 || true
+done
+mc -l '"msm_csiphy0":1->"msm_csid0":0[1]'
+for v in $(mc -p | sed -n 's/^- entity [0-9]*: \(msm_vfe[0-9]*_\(rdi[0-9]*\|pix\)\) .*/\1/p'); do
+	[ "$v" = msm_vfe0_rdi0 ] || mc -l "\"msm_csid0\":1->\"$v\":0[0]" >/dev/null 2>&1 || true
+done
+mc -l '"msm_csid0":1->"msm_vfe0_rdi0":0[1]'
+mc -V "\"$S\":0[fmt:$F]"
+mc -V "\"msm_csiphy0\":0[fmt:$F]"
+mc -V "\"msm_csid0\":0[fmt:$F]"
+mc -V "\"msm_vfe0_rdi0\":0[fmt:$F]"
+# exposición manual: dos órdenes, en una sola el valor no se aplica
+SD=$(mc -e "$S")
+v4l2-ctl -d "$SD" --set-ctrl=auto_exposure=1
+v4l2-ctl -d "$SD" --set-ctrl=exposure=$IR_EXPOSICION,analogue_gain=0,digital_gain=$IR_GANANCIA_DIGITAL

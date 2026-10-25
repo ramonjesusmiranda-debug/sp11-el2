@@ -1,0 +1,68 @@
+--- a/libavcodec/v4l2_context.c	2026-10-25 13:24:12.618433934 +0100
++++ b/libavcodec/v4l2_context.c	2026-10-25 13:29:55.813806492 +0100
+@@ -206,7 +206,11 @@
+         s->capture.width = v4l2_get_width(&cap_fmt);
+         s->capture.sample_aspect_ratio = v4l2_get_sar(&s->capture);
+     } else {
+-        v4l2_start_decode(ctx);
++        /* The stateful decoder spec only allows START once the LAST capture
++         * buffer has been dequeued; drivers that enforce it (iris) return
++         * EBUSY here, so retry when that buffer shows up. */
++        if (v4l2_start_decode(ctx) == AVERROR(EBUSY))
++            s->start_pending = 1;
+         return 0;
+     }
+ 
+@@ -396,6 +400,28 @@
+             return NULL;
+         }
+ 
++#ifdef V4L2_BUF_FLAG_LAST
++        if (ctx_to_m2mctx(ctx)->start_pending && !ctx_to_m2mctx(ctx)->draining &&
++            !V4L2_TYPE_IS_OUTPUT(ctx->type) && (buf.flags & V4L2_BUF_FLAG_LAST)) {
++            /* end of the old sequence: resume decoding and give the empty
++             * buffer back to the driver instead of returning it as a frame */
++            ctx_to_m2mctx(ctx)->start_pending = 0;
++            ret = v4l2_start_decode(ctx);
++            if (ret < 0)
++                av_log(logger(ctx), AV_LOG_ERROR, "%s VIDIOC_DECODER_CMD start: %s\n",
++                       ctx->name, av_err2str(ret));
++            avbuf = &ctx->buffers[buf.index];
++            avbuf->status = V4L2BUF_AVAILABLE;
++            avbuf->buf = buf;
++            if (V4L2_TYPE_IS_MULTIPLANAR(ctx->type)) {
++                memcpy(avbuf->planes, planes, sizeof(planes));
++                avbuf->buf.m.planes = avbuf->planes;
++            }
++            ff_v4l2_buffer_enqueue(avbuf);
++            goto start;
++        }
++#endif
++
+         if (ctx_to_m2mctx(ctx)->draining && !V4L2_TYPE_IS_OUTPUT(ctx->type)) {
+             int bytesused = V4L2_TYPE_IS_MULTIPLANAR(buf.type) ?
+                             buf.m.planes[0].bytesused : buf.bytesused;
+--- a/libavcodec/v4l2_m2m.h	2026-10-25 13:24:12.618479556 +0100
++++ b/libavcodec/v4l2_m2m.h	2026-10-25 13:29:55.813870083 +0100
+@@ -57,6 +57,11 @@
+ 
+     /* null frame/packet received */
+     int draining;
++
++    /* source change without a format change: DECODER_CMD START was refused
++     * (EBUSY) because the driver had not returned the LAST capture buffer
++     * yet; send it again when that buffer is dequeued */
++    int start_pending;
+     AVPacket buf_pkt;
+ 
+     /* Reference to a frame. Only used during encoding */
+--- a/libavcodec/v4l2_m2m_dec.c	2026-10-25 13:24:12.618514867 +0100
++++ b/libavcodec/v4l2_m2m_dec.c	2026-10-25 13:29:55.814193665 +0100
+@@ -291,6 +291,7 @@
+         av_log(avctx, AV_LOG_ERROR, "VIDIOC_DECODER_CMD start error: %d\n", errno);
+ 
+     s->draining = 0;
++    s->start_pending = 0;
+     output->done = 0;
+     capture->done = 0;
+ }

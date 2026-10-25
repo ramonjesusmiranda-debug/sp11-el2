@@ -1,0 +1,413 @@
+From: Claude (CT108) <claude@ct108>
+Subject: [PATCH] media: iris: boot the VPU at EL2 like Windows' QcSkExt
+
+At EL2 (no Hyper-V) TZ authenticates the Iris firmware (PAS 9) but does
+not handle MEM_PROTECT_VIDEO_VAR or SET_REMOTE_STATE: on Windows the CSRT
+(QCOM group, policy 2) routes them to QcSkExt8380 in VTL1, which programs
+the VPU windows and releases its reset. Do the same from the driver:
+
+- own "video-firmware" context bank, firmware loaded with
+  qcom_mdt_pas_load + IOMMU mapping at 0 (context bank port and Secure
+  PAS from the list);
+- iris_el2_vpu_boot(): FW/CPA/non-pixel windows, SEC_SID, fuses via
+  SMC 0x2000802 and the VPU CPU taken out of reset;
+- set_hw_state: suspend does nothing and resume repeats the boot.
+
+Tested 24/25-10-2026 on a Surface Pro 11 (x1e80100) at EL2: H.264, HEVC
+and VP9 identical to software decoding frame by frame; AV1 149/150
+frames (the first one is lost); 8 h of s2idle with the driver loaded.
+
+diff -ru a/drivers/media/platform/qcom/iris/iris_core.h b/drivers/media/platform/qcom/iris/iris_core.h
+--- a/drivers/media/platform/qcom/iris/iris_core.h	2026-10-25 07:27:00.098289491 +0000
++++ b/drivers/media/platform/qcom/iris/iris_core.h	2026-10-25 07:27:00.099121739 +0000
+@@ -81,6 +81,8 @@
+ 
+ struct iris_core {
+ 	struct device				*dev;
++	struct device				*fw_dev;
++	struct qcom_scm_pas_context		*pas_ctx;
+ 	void __iomem				*reg_base;
+ 	int					irq;
+ 	struct v4l2_device			v4l2_dev;
+diff -ru a/drivers/media/platform/qcom/iris/iris_firmware.c b/drivers/media/platform/qcom/iris/iris_firmware.c
+--- a/drivers/media/platform/qcom/iris/iris_firmware.c	2026-10-25 07:27:00.098330327 +0000
++++ b/drivers/media/platform/qcom/iris/iris_firmware.c	2026-10-25 07:27:00.099156604 +0000
+@@ -3,8 +3,10 @@
+  * Copyright (c) 2022-2024 Qualcomm Innovation Center, Inc. All rights reserved.
+  */
+ 
++#include <linux/arm-smccc.h>
+ #include <linux/firmware.h>
+ #include <linux/firmware/qcom/qcom_scm.h>
++#include <linux/iommu.h>
+ #include <linux/of_address.h>
+ #include <linux/of_reserved_mem.h>
+ #include <linux/soc/qcom/mdt_loader.h>
+@@ -13,31 +15,41 @@
+ #include "iris_firmware.h"
+ 
+ #define IRIS_PAS_ID				9
+-
+-#define MAX_FIRMWARE_NAME_SIZE	128
++#define MAX_FIRMWARE_NAME_SIZE			128
++#define IRIS_FIRMWARE_START_ADDR		0
+ 
+ static int iris_load_fw_to_memory(struct iris_core *core, const char *fw_name)
+ {
++	struct device *fw_dev = core->fw_dev ? core->fw_dev : core->dev;
+ 	const struct firmware *firmware = NULL;
+-	struct device *dev = core->dev;
++	struct qcom_scm_pas_context *ctx;
++	struct iommu_domain *domain;
+ 	struct resource res;
+ 	phys_addr_t mem_phys;
+ 	size_t res_size;
+ 	ssize_t fw_size;
+-	void *mem_virt;
++	void *mem_virt = NULL;
+ 	int ret;
+ 
+ 	if (strlen(fw_name) >= MAX_FIRMWARE_NAME_SIZE - 4)
+ 		return -EINVAL;
+ 
+-	ret = of_reserved_mem_region_to_resource(dev->of_node, 0, &res);
++	ret = of_reserved_mem_region_to_resource(core->dev->of_node, 0, &res);
+ 	if (ret)
+ 		return ret;
+ 
+ 	mem_phys = res.start;
+ 	res_size = resource_size(&res);
+ 
+-	ret = request_firmware(&firmware, fw_name, dev);
++	if (!core->pas_ctx) {
++		ctx = devm_qcom_scm_pas_context_alloc(core->dev, IRIS_PAS_ID,
++						      mem_phys, res_size);
++		if (IS_ERR(ctx))
++			return PTR_ERR(ctx);
++		core->pas_ctx = ctx;
++	}
++
++	ret = request_firmware(&firmware, fw_name, core->dev);
+ 	if (ret)
+ 		return ret;
+ 
+@@ -47,22 +59,127 @@
+ 		goto err_release_fw;
+ 	}
+ 
++	core->pas_ctx->use_tzmem = !!core->fw_dev;
+ 	mem_virt = memremap(mem_phys, res_size, MEMREMAP_WC);
+ 	if (!mem_virt) {
+ 		ret = -ENOMEM;
+ 		goto err_release_fw;
+ 	}
+ 
+-	ret = qcom_mdt_load(dev, firmware, fw_name,
+-			    IRIS_PAS_ID, mem_virt, mem_phys, res_size, NULL);
++	ret = qcom_mdt_pas_load(core->pas_ctx, firmware, fw_name, mem_virt, NULL);
++	if (mem_virt)
++		memunmap(mem_virt);
++	if (ret)
++		goto err_release_fw;
++
++	if (core->pas_ctx->use_tzmem) {
++		domain = iommu_get_domain_for_dev(fw_dev);
++		if (!domain) {
++			ret = -ENODEV;
++			goto err_release_fw;
++		}
++
++		ret = iommu_map(domain, IRIS_FIRMWARE_START_ADDR, mem_phys, res_size,
++				IOMMU_READ | IOMMU_WRITE | IOMMU_PRIV, GFP_KERNEL);
++	}
+ 
+-	memunmap(mem_virt);
+ err_release_fw:
+ 	release_firmware(firmware);
+ 
+ 	return ret;
+ }
+ 
++static void iris_fw_iommu_unmap(struct iris_core *core)
++{
++	struct iommu_domain *domain;
++
++	if (!core->fw_dev || !core->pas_ctx)
++		return;
++
++	domain = iommu_get_domain_for_dev(core->fw_dev);
++	if (domain)
++		iommu_unmap(domain, IRIS_FIRMWARE_START_ADDR, core->pas_ctx->mem_size);
++}
++
++/* SMC SiP de 1 argumento (servicio/orden en «cmd»), como FUN_14000a780 de QcSkExt */
++static long el2_smc1(u32 cmd, u32 arg, unsigned long *r1)
++{
++	struct arm_smccc_quirk quirk = { .id = ARM_SMCCC_QUIRK_QCOM_A6 };
++	struct arm_smccc_res res;
++	unsigned long a0 = ARM_SMCCC_CALL_VAL(ARM_SMCCC_STD_CALL, ARM_SMCCC_SMC_64,
++					      ARM_SMCCC_OWNER_SIP, cmd);
++	int n = 0;
++
++	quirk.state.a6 = 0;
++	do {
++		arm_smccc_smc_quirk(a0, 1, arg, 0, 0, 0, quirk.state.a6, 0, &res, &quirk);
++		if (res.a0 == 1)
++			a0 = res.a0;
++	} while (res.a0 == 1 && ++n < 1000);
++	*r1 = res.a1;
++	return (long)res.a0;
++}
++
++/*
++ * Arranque del VPU en EL2, como QcSkExt8380 (VTL1 de Windows, FUN_14000ba78 -> b968 -> d7a0).
++ * Bajo Hyper-V la CSRT manda MEM_PROTECT_VIDEO_VAR (0x42000c08) y SET_REMOTE_STATE (0x4200010a)
++ * a SKExt, no a TZ: TZ autentica la imagen pero deja la CPU del VPU en reset. SKExt programa
++ * las ventanas de firmware/CP/no-pixel y los SID seguros y suelta el reset; aquí igual.
++ */
++static int iris_el2_vpu_boot(struct iris_core *core, const struct tz_cp_config *cp_config)
++{
++	void __iomem *b = core->reg_base;
++	u32 ver = readl(b + 0xb0000), fuses = 0;
++	u32 fwend = ALIGN(core->pas_ctx->mem_size, SZ_4K);
++	static const u32 sid0[] = { 0xc2090, 0xc2040, 0xc2044, 0xc2048, 0xc204c, 0xc2050,
++		0xc2054, 0xc2058, 0xc205c, 0xc2060, 0xc2064, 0xc2068, 0xc206c, 0xc2070,
++		0xc2074, 0xc2078, 0xc207c, 0xc2080 };
++	static const u32 cfg[][2] = { { 0xb1084, 1 }, { 0xc2024, 3 }, { 0xc2004, 0x540 },
++		{ 0xc2008, 0x10e }, { 0xc202c, 0x500 }, { 0xc2018, 0xed8 }, { 0xc201c, 0x3138 } };
++	static const u32 sid1[] = { 0xc2044, 0xc205c, 0xc207c, 0xc2070, 0xc2074, 0xc2078 };
++	static const u32 fbits[][2] = { { 0xd, 6 }, { 0xe, 0x18 }, { 0x10, 0x20 }, { 0xf, 0x40 } };
++	int k;
++
++	if (!(readl(b + 0xc1000) & 1)) {
++		dev_err(core->dev, "el2: VPU not in reset (%#x)\n", readl(b + 0xc1000));
++		return -EIO;
++	}
++	/* b968 */
++	writel(0, b + 0xc1028);
++	writel(fwend, b + 0xc102c);
++	writel(cp_config->cp_start, b + 0xc1020);
++	writel(cp_config->cp_size, b + 0xc1024);
++	if (ver >= 0x10020000) {
++		writel(cp_config->cp_nonpixel_start, b + 0xc1030);
++		writel(cp_config->cp_nonpixel_start + cp_config->cp_nonpixel_size, b + 0xc1034);
++	}
++	/* d7a0 */
++	for (k = 0; k < ARRAY_SIZE(sid0); k++)
++		writel(0, b + sid0[k]);
++	for (k = 0; k < ARRAY_SIZE(cfg); k++)
++		writel(cfg[k][1], b + cfg[k][0]);
++	for (k = 0; k < ARRAY_SIZE(sid1); k++) {
++		writel(readl(b + sid1[k]) | 1, b + sid1[k]);
++		if (!(readl(b + sid1[k]) & 1))
++			dev_err(core->dev, "el2: SEC_SID %#x did not latch\n", sid1[k]);
++	}
++	for (k = 0; k < ARRAY_SIZE(fbits); k++) {
++		unsigned long v = 0;
++		long st = el2_smc1(0x0802, fbits[k][0], &v);
++
++		if (st || v)
++			fuses |= fbits[k][1];
++	}
++	writel(fuses ? fuses | 1 : 0, b + 0xb108c);
++	/* ba78: soltar el reset de la CPU del VPU */
++	writel(readl(b + 0xc1000) & ~1u, b + 0xc1000);
++	dev_dbg(core->dev, "el2 boot: ver %#x reset %#x fw %#x-%#x cpa %#x-%#x np %#x-%#x fus %#x\n",
++		 ver, readl(b + 0xc1000), readl(b + 0xc1028), readl(b + 0xc102c),
++		 readl(b + 0xc1020), readl(b + 0xc1024), readl(b + 0xc1030),
++		 readl(b + 0xc1034), readl(b + 0xb108c));
++	return 0;
++}
++
+ int iris_fw_load(struct iris_core *core)
+ {
+ 	const struct tz_cp_config *cp_config;
+@@ -76,38 +193,65 @@
+ 
+ 	ret = iris_load_fw_to_memory(core, fwpath);
+ 	if (ret) {
+-		dev_err(core->dev, "firmware download failed\n");
++		dev_err(core->dev, "firmware download failed: %d\n", ret);
+ 		return -ENOMEM;
+ 	}
+ 
+-	ret = qcom_scm_pas_auth_and_reset(IRIS_PAS_ID);
+-	if (ret)  {
++	ret = qcom_scm_pas_prepare_and_auth_reset(core->pas_ctx);
++	if (ret) {
+ 		dev_err(core->dev, "auth and reset failed: %d\n", ret);
+-		return ret;
++		goto err_unmap;
+ 	}
+ 
+-	for (i = 0; i < core->iris_platform_data->tz_cp_config_data_size; i++) {
+-		cp_config = &core->iris_platform_data->tz_cp_config_data[i];
+-		ret = qcom_scm_mem_protect_video_var(cp_config->cp_start,
+-						     cp_config->cp_size,
+-						     cp_config->cp_nonpixel_start,
+-						     cp_config->cp_nonpixel_size);
+-		if (ret) {
+-			dev_err(core->dev, "qcom_scm_mem_protect_video_var failed: %d\n", ret);
+-			qcom_scm_pas_shutdown(IRIS_PAS_ID);
+-			return ret;
++	if (core->pas_ctx->use_tzmem) {
++		/* EL2: VIDEO_VAR no llega a TZ (en Windows la atiende SKExt) */
++		for (i = 0; i < core->iris_platform_data->tz_cp_config_data_size; i++) {
++			cp_config = &core->iris_platform_data->tz_cp_config_data[i];
++			ret = iris_el2_vpu_boot(core, cp_config);
++			if (ret)
++				goto err_pas_shutdown;
++		}
++	} else {
++		for (i = 0; i < core->iris_platform_data->tz_cp_config_data_size; i++) {
++			cp_config = &core->iris_platform_data->tz_cp_config_data[i];
++			ret = qcom_scm_mem_protect_video_var(cp_config->cp_start,
++							     cp_config->cp_size,
++							     cp_config->cp_nonpixel_start,
++							     cp_config->cp_nonpixel_size);
++			if (ret) {
++				dev_err(core->dev, "qcom_scm_mem_protect_video_var failed: %d\n", ret);
++				goto err_pas_shutdown;
++			}
+ 		}
+ 	}
+ 
++	return 0;
++
++err_pas_shutdown:
++	qcom_scm_pas_shutdown(IRIS_PAS_ID);
++err_unmap:
++	iris_fw_iommu_unmap(core);
++
+ 	return ret;
+ }
+ 
+ int iris_fw_unload(struct iris_core *core)
+ {
+-	return qcom_scm_pas_shutdown(IRIS_PAS_ID);
++	int ret;
++
++	ret = qcom_scm_pas_shutdown(IRIS_PAS_ID);
++	iris_fw_iommu_unmap(core);
++
++	return ret;
+ }
+ 
+ int iris_set_hw_state(struct iris_core *core, bool resume)
+ {
++	/* EL2: como SKExt (FUN_14000bde0), suspender no hace nada y reanudar repite el arranque */
++	if (core->pas_ctx && core->pas_ctx->use_tzmem) {
++		if (!resume)
++			return 0;
++		return iris_el2_vpu_boot(core, &core->iris_platform_data->tz_cp_config_data[0]);
++	}
+ 	return qcom_scm_set_remote_state(resume, 0);
+ }
+diff -ru a/drivers/media/platform/qcom/iris/iris_probe.c b/drivers/media/platform/qcom/iris/iris_probe.c
+--- a/drivers/media/platform/qcom/iris/iris_probe.c	2026-10-25 07:27:00.098361505 +0000
++++ b/drivers/media/platform/qcom/iris/iris_probe.c	2026-10-25 07:27:00.099188553 +0000
+@@ -8,6 +8,7 @@
+ #include <linux/module.h>
+ #include <linux/pm_domain.h>
+ #include <linux/pm_opp.h>
++#include <linux/of_device.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/reset.h>
+ #include <linux/soc/qcom/ubwc.h>
+@@ -150,6 +151,62 @@
+ 	return iris_init_resets(core);
+ }
+ 
++static struct device *iris_create_cb_dev(struct iris_core *core, const char *name)
++{
++	struct platform_device_info plat_dev_info = {};
++	struct device_node *child_of_node;
++	struct platform_device *pdev;
++	int ret;
++
++	child_of_node = of_get_child_by_name(core->dev->of_node, name);
++	if (!child_of_node)
++		return NULL;
++
++	plat_dev_info.dma_mask = core->iris_platform_data->dma_mask;
++	plat_dev_info.fwnode = &child_of_node->fwnode;
++	plat_dev_info.name = child_of_node->name;
++	plat_dev_info.id = PLATFORM_DEVID_AUTO;
++	plat_dev_info.parent = core->dev;
++
++	pdev = platform_device_register_full(&plat_dev_info);
++	if (IS_ERR(pdev)) {
++		of_node_put(child_of_node);
++		return ERR_CAST(pdev);
++	}
++
++	ret = of_dma_configure(&pdev->dev, child_of_node, true);
++	of_node_put(child_of_node);
++	if (ret) {
++		platform_device_unregister(pdev);
++		return ERR_PTR(ret);
++	}
++
++	dma_set_max_seg_size(&pdev->dev, DMA_BIT_MASK(32));
++	dma_set_seg_boundary(&pdev->dev, DMA_BIT_MASK(32));
++
++	return &pdev->dev;
++}
++
++static int iris_init_cb_devs(struct iris_core *core)
++{
++	struct device *dev;
++
++	dev = iris_create_cb_dev(core, "video-firmware");
++	if (IS_ERR(dev))
++		return PTR_ERR(dev);
++
++	core->fw_dev = dev;
++	return 0;
++}
++
++static void iris_deinit_cb_devs(struct iris_core *core)
++{
++	if (core->fw_dev) {
++		platform_device_unregister(to_platform_device(core->fw_dev));
++		core->fw_dev = NULL;
++	}
++}
++
+ static int iris_register_video_device(struct iris_core *core, enum domain_type type)
+ {
+ 	struct video_device *vdev;
+@@ -207,6 +264,8 @@
+ 
+ 	v4l2_device_unregister(&core->v4l2_dev);
+ 
++	iris_deinit_cb_devs(core);
++
+ 	mutex_destroy(&core->lock);
+ }
+ 
+@@ -273,10 +332,14 @@
+ 
+ 	iris_session_init_caps(core);
+ 
+-	ret = v4l2_device_register(dev, &core->v4l2_dev);
++	ret = iris_init_cb_devs(core);
+ 	if (ret)
+ 		return ret;
+ 
++	ret = v4l2_device_register(dev, &core->v4l2_dev);
++	if (ret)
++		goto err_cb_deinit;
++
+ 	ret = iris_register_video_device(core, DECODER);
+ 	if (ret)
+ 		goto err_v4l2_unreg;
+@@ -310,6 +373,8 @@
+ 	video_unregister_device(core->vdev_dec);
+ err_v4l2_unreg:
+ 	v4l2_device_unregister(&core->v4l2_dev);
++err_cb_deinit:
++	iris_deinit_cb_devs(core);
+ 
+ 	return ret;
+ }

@@ -13,7 +13,7 @@ mkinitcpio -p "$pkgbase" >/dev/null
 [[ -e $base && -e $initrd ]] || { echo "sp11-el2-uki: falta $base o $initrd" >&2; exit 1; }
 tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
 O=/usr/share/sp11-el2
-cmd="$(tr -s '\n' ' ' </etc/kernel/cmdline) mem_sleep_default=s2idle fw_devlink.sync_state=timeout irqchip.gicv3_pseudo_nmi=1 pcie_port_pm=force msm.psr_enabled=1 efi_pstore.pstore_disable=0"
+cmd="$(tr -s '\n' ' ' </etc/kernel/cmdline) mem_sleep_default=s2idle fw_devlink.sync_state=timeout irqchip.gicv3_pseudo_nmi=1 pcie_port_pm=force msm.psr_enabled=1 efi_pstore.pstore_disable=0 cma=512M"
 [[ -r /etc/kernel/cmdline-el2.extra ]] && cmd="$cmd $({ grep -v '^#' /etc/kernel/cmdline-el2.extra || true; } | tr -s '\n' ' ')"
 install -d "$esp/sl"
 uki() {	# $1 = nombre, $2 = título, resto = overlays
@@ -28,5 +28,5 @@ uki() {	# $1 = nombre, $2 = título, resto = overlays
 uki el2 "Arch Linux EL2 sin DSP (Surface Pro 11)" sp11-el2-adsp-adjunto sp11-el2-fase2 sp11-el2-sin-ss1 sp11-el2-sleepstate sp11-el2-cl5-solo-suspension
 # Principal: ADSP y CDSP arrancados por Linux (x1e-dsp, CDSP genérico qcom/x1e80100/cdsp.mbn): audio, NPU, cxsd+aosd
 uki el2-dsp "Arch Linux EL2 (Surface Pro 11)" sp11-el2-sin-ss1 sp11-el2-sleepstate sp11-el2-cl5-solo-suspension sp11-el2-cdsp-generico
-# Alias de compatibilidad (desde 23-10 la entrada principal ya lleva sp11-el2-cdsp-generico)
-uki el2-dsp-cdspgen "Arch Linux EL2 (CDSP genérico, prueba)" sp11-el2-sin-ss1 sp11-el2-sleepstate sp11-el2-cl5-solo-suspension sp11-el2-cdsp-generico
+# Prueba (24-10): la principal + cámara IR VD55G0 (sp11-el2-camara-ir, driver vd55g0-dkms). Si sondea bien, pasarla a el2-dsp
+uki el2-dsp-cdspgen "Arch Linux EL2 (prueba: cámara IR)" sp11-el2-sin-ss1 sp11-el2-sleepstate sp11-el2-cl5-solo-suspension sp11-el2-cdsp-generico sp11-el2-camara-ir

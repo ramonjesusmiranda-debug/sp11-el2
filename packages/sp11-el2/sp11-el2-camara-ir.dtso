@@ -1,0 +1,97 @@
+/dts-v1/;
+/plugin/;
+/* Cámara IR (24-10-2026): ST VD55G0 en cci0/0 @0x60, 1 carril D-PHY a csiphy0. Cableado del SCFG/CAMP de Windows:
+ * MCLK0 gpio96, reset gpio109, l2m 1,152 V (vcore), l4m 1,8 V (vddio), l7m 2,8 V (vana). Driver: vd55g0-dkms.
+ * Solo en la UKI de prueba el2-dsp-cdspgen.
+ * Emisor IR (medido 24-10): flash del PM8550 (pmic@1, 0xee00), canales 1 y 4 (los mismos 50 mA en cualquiera de los
+ * dos dan la misma luz). El GPIO1 del sensor en estrobo no dispara la entrada HW del PMIC: va en linterna, encendido
+ * por V4L2 al emitir como LED «privacy». 100 mA en total (50 por canal, lo probado).
+ * Sin cpp (dtc directo): 71 = CAM_CC_MCLK0_CLK, 1 = GPIO_ACTIVE_LOW, 4 = MEDIA_BUS_TYPE_CSI2_DPHY, 5 = LED_COLOR_ID_IR */
+
+&pm8550_flash {
+	status = "okay";
+
+	cam_ir_led: led-0 {
+		function = "flash";
+		color = <5>;
+		led-sources = <1>, <4>;
+		led-max-microamp = <100000>;
+	};
+};
+
+&camss_csiphy0_in_port {
+	camss_csiphy0_inep: endpoint {
+		bus-type = <4>;
+		data-lanes = <1>;
+		remote-endpoint = <&csiphy0_out_ep>;
+	};
+};
+
+&cci0_i2c0 {
+	clock-frequency = <400000>;
+	#address-cells = <1>;
+	#size-cells = <0>;
+
+	camera@60 {
+		compatible = "st,vd55g0";
+		reg = <0x60>;
+		reset-gpios = <&tlmm 109 1>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&cam_ir_default>;
+		clocks = <&camcc 71>;
+		assigned-clocks = <&camcc 71>;
+		assigned-clock-rates = <19200000>;
+		vcore-supply = <&vreg_l2m_1p15>;
+		vddio-supply = <&vreg_l4m_1p8>;
+		vana-supply = <&vreg_l7m_2p8>;
+		leds = <&cam_ir_led>;
+		led-names = "privacy";
+
+		port {
+			vd55g0_ep: endpoint {
+				data-lanes = <1>;
+				link-frequencies = /bits/ 64 <600000000>;
+				remote-endpoint = <&csiphy0_in_ep>;
+			};
+		};
+	};
+};
+
+&csiphy0 {
+	vdda-0p9-supply = <&vreg_l2c_0p8>;
+	vdda-1p2-supply = <&vreg_l1c_1p2>;
+	status = "okay";
+};
+
+&csiphy0_in_port {
+	csiphy0_in_ep: endpoint {
+		bus-type = <4>;
+		data-lanes = <1>;
+		remote-endpoint = <&vd55g0_ep>;
+	};
+};
+
+&csiphy0_out_port {
+	csiphy0_out_ep: endpoint {
+		bus-type = <4>;
+		remote-endpoint = <&camss_csiphy0_inep>;
+	};
+};
+
+&tlmm {
+	cam_ir_default: cam-ir-default-state {
+		mclk-pins {
+			pins = "gpio96";
+			function = "cam_mclk";
+			drive-strength = <2>;
+			bias-disable;
+		};
+
+		reset-n-pins {
+			pins = "gpio109";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-disable;
+		};
+	};
+};

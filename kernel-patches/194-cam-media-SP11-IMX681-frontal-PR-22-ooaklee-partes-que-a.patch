@@ -1,0 +1,3337 @@
+From b1df2d1b1209570aed0bafff947e0613dbd30c1c Mon Sep 17 00:00:00 2001
+From: Ramón Jesús Miranda <ramonjesusmiranda@gmail.com>
+Date: Sat, 24 Oct 2026 15:39:24 +0000
+Subject: [PATCH 194/197] media: SP11 IMX681 front camera (ooaklee PR #22, the parts that apply cleanly)
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+---
+ .../bindings/media/i2c/mipi-ccs.yaml          |   5 +
+ drivers/media/i2c/Kconfig                     |  12 +
+ drivers/media/i2c/Makefile                    |   1 +
+ drivers/media/i2c/ccs/ccs-core.c              | 521 ++++++++++++++--
+ drivers/media/i2c/ccs/ccs-imx681-init.h       |  74 +++
+ drivers/media/i2c/ccs/ccs-imx681-mode.h       |  33 ++
+ drivers/media/i2c/ccs/ccs-imx681-vendor.h     | 375 ++++++++++++
+ drivers/media/i2c/ccs/ccs-quirk.c             |  68 +++
+ drivers/media/i2c/ccs/ccs-quirk.h             |   1 +
+ drivers/media/i2c/ccs/ccs-reg-access.c        |   3 +
+ drivers/media/i2c/ccs/ccs.h                   |  28 +
+ drivers/media/i2c/imx681-tables.h             | 455 ++++++++++++++
+ drivers/media/i2c/imx681.c                    | 554 ++++++++++++++++++
+ .../platform/qcom/camss/camss-csid-680.c      |  94 ++-
+ .../media/platform/qcom/camss/camss-csid.c    |  44 +-
+ .../media/platform/qcom/camss/camss-csid.h    |  12 +
+ .../media/platform/qcom/camss/camss-csiphy.h  |   1 +
+ .../media/platform/qcom/camss/camss-vfe-680.c |  43 +-
+ .../media/platform/qcom/camss/camss-video.c   |  61 +-
+ drivers/media/platform/qcom/camss/camss.c     |  69 ++-
+ .../phy-qcom-mipi-csi2-cphy-x1e80100.h        | 198 +++++++
+ include/linux/phy/phy.h                       |   1 +
+ 22 files changed, 2550 insertions(+), 103 deletions(-)
+ create mode 100644 drivers/media/i2c/ccs/ccs-imx681-init.h
+ create mode 100644 drivers/media/i2c/ccs/ccs-imx681-mode.h
+ create mode 100644 drivers/media/i2c/ccs/ccs-imx681-vendor.h
+ create mode 100644 drivers/media/i2c/imx681-tables.h
+ create mode 100644 drivers/media/i2c/imx681.c
+ create mode 100644 drivers/phy/qualcomm/phy-qcom-mipi-csi2-cphy-x1e80100.h
+
+diff --git a/Documentation/devicetree/bindings/media/i2c/mipi-ccs.yaml b/Documentation/devicetree/bindings/media/i2c/mipi-ccs.yaml
+index 217b08c8c..3e012d71b 100644
+--- a/Documentation/devicetree/bindings/media/i2c/mipi-ccs.yaml
++++ b/Documentation/devicetree/bindings/media/i2c/mipi-ccs.yaml
+@@ -65,6 +65,11 @@ properties:
+   flash-leds: true
+   lens-focus: true
+ 
++  leds: true
++  led-names: true
++
++  orientation: true
++
+   rotation:
+     enum: [ 0, 180 ]
+ 
+diff --git a/drivers/media/i2c/Kconfig b/drivers/media/i2c/Kconfig
+index 5d173e0ec..40c6eafad 100644
+--- a/drivers/media/i2c/Kconfig
++++ b/drivers/media/i2c/Kconfig
+@@ -287,6 +287,18 @@ config VIDEO_IMX415
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called imx415.
+ 
++config VIDEO_IMX681
++	tristate "Sony IMX681 sensor support"
++	depends on OF_GPIO
++	select V4L2_CCI_I2C
++	help
++	  This is a Video4Linux2 sensor driver for the Sony IMX681 camera.
++	  It currently supports the 3840x2640 RAW10 C-PHY mode used by the
++	  front-facing camera in the Microsoft Surface Pro 11.
++
++	  To compile this driver as a module, choose M here: the
++	  module will be called imx681.
++
+ config VIDEO_MAX9271_LIB
+ 	tristate
+ 
+diff --git a/drivers/media/i2c/Makefile b/drivers/media/i2c/Makefile
+index e45359efe..2c8605c58 100644
+--- a/drivers/media/i2c/Makefile
++++ b/drivers/media/i2c/Makefile
+@@ -61,6 +61,7 @@ obj-$(CONFIG_VIDEO_IMX335) += imx335.o
+ obj-$(CONFIG_VIDEO_IMX355) += imx355.o
+ obj-$(CONFIG_VIDEO_IMX412) += imx412.o
+ obj-$(CONFIG_VIDEO_IMX415) += imx415.o
++obj-$(CONFIG_VIDEO_IMX681) += imx681.o
+ obj-$(CONFIG_VIDEO_IR_I2C) += ir-kbd-i2c.o
+ obj-$(CONFIG_VIDEO_ISL7998X) += isl7998x.o
+ obj-$(CONFIG_VIDEO_KS0127) += ks0127.o
+diff --git a/drivers/media/i2c/ccs/ccs-core.c b/drivers/media/i2c/ccs/ccs-core.c
+index 8e25f970f..d285421d3 100644
+--- a/drivers/media/i2c/ccs/ccs-core.c
++++ b/drivers/media/i2c/ccs/ccs-core.c
+@@ -19,6 +19,7 @@
+ #include <linux/device.h>
+ #include <linux/firmware.h>
+ #include <linux/gpio/consumer.h>
++#include <linux/math64.h>
+ #include <linux/module.h>
+ #include <linux/pm_runtime.h>
+ #include <linux/property.h>
+@@ -33,6 +34,18 @@
+ #include <uapi/linux/ccs.h>
+ 
+ #include "ccs.h"
++#include "ccs-imx681-init.h"
++#include "ccs-imx681-mode.h"
++#include "ccs-imx681-vendor.h"
++
++/*
++ * Bring-up aid: bit 0 skips lane-mode register 0x0114, bit 1 skips PLL
++ * registers 0x0300..0x030f, and bit 2 skips the 361-row vendor table.
++ */
++static unsigned int imx681_mode_skip;
++module_param(imx681_mode_skip, uint, 0444);
++MODULE_PARM_DESC(imx681_mode_skip,
++		 "Load-time bring-up: IMX681 skip mask, bit0 lane, bit1 PLL, bit2 vendor");
+ 
+ #define CCS_ALIGN_DIM(dim, flags)	\
+ 	((flags) & V4L2_SEL_FLAG_GE	\
+@@ -61,6 +74,37 @@ static const struct ccs_module_ident ccs_module_idents[] = {
+ 	CCS_IDENT_LQ(0x10, 0x4241, -1, "imx125es", &smiapp_imx125es_quirk),
+ };
+ 
++struct ccs_sensor_ident {
++	u16 manufacturer_id;
++	u16 model_id;
++	u16 revision;
++	char *name;
++	const struct ccs_quirk *quirk;
++};
++
++#define CCS_IMX681_IDENT(_manufacturer_id) { \
++	.manufacturer_id = (_manufacturer_id), \
++	.model_id = CCS_IMX681_MODEL_ID, \
++	.revision = CCS_IMX681_REVISION, \
++	.name = "imx681", \
++	.quirk = &ccs_imx681_quirk, \
++}
++
++static const struct ccs_sensor_ident ccs_sensor_idents[] = {
++	CCS_IMX681_IDENT(CCS_IMX681_MFR_ID),
++	CCS_IMX681_IDENT(CCS_IMX681_SP11_MFR_ID),
++};
++
++static const struct ccs_imx681_mode *
++ccs_imx681_current_mode(const struct ccs_sensor *sensor)
++{
++	if (!ccs_is_imx681(sensor))
++		return NULL;
++
++	/* The 3844x2640 mode is the only mode validated on the SP11 C-PHY. */
++	return &imx681_mode;
++}
++
+ #define CCS_DEVICE_FLAG_IS_SMIA		BIT(0)
+ 
+ struct ccs_device {
+@@ -597,11 +641,136 @@ static int ccs_pll_update(struct ccs_sensor *sensor)
+  *
+  */
+ 
++#define IMX681_EXPOSURE_MIN_TICKS	5000U
++#define IMX681_EXPOSURE_MAX_TICKS	2000000U
++#define IMX681_EXPOSURE_STEP_TICKS	10U
++
++static int ccs_imx681_group_write(struct ccs_sensor *sensor,
++				  const struct ccs_reg_8 *regs,
++				  unsigned int num_regs)
++{
++	struct i2c_client *client = v4l2_get_subdevdata(&sensor->src->sd);
++	int release_ret;
++	int ret;
++	unsigned int i;
++
++	if (!ccs_is_imx681(sensor))
++		return -EINVAL;
++
++	ret = ccs_write_addr(sensor, CCI_REG8(0x0104), 1);
++	if (ret)
++		return ret;
++
++	for (i = 0; i < num_regs; i++) {
++		ret = ccs_write_addr(sensor, CCI_REG8(regs[i].reg), regs[i].val);
++		if (ret)
++			break;
++	}
++
++	release_ret = ccs_write_addr(sensor, CCI_REG8(0x0104), 0);
++	if (release_ret) {
++		dev_dbg(&client->dev, "IMX681 group hold release failed: %d\n",
++			release_ret);
++		if (!ret)
++			ret = release_ret;
++	}
++
++	return ret;
++}
++
++static int ccs_imx681_set_exposure(struct ccs_sensor *sensor, u32 exposure)
++{
++	/* 0x0229 is a 24-bit line count; control bounds are converted to lines. */
++	const struct ccs_reg_8 regs[] = {
++		{ 0x0229, (exposure >> 16) & 0xff },
++		{ 0x022a, (exposure >> 8) & 0xff },
++		{ 0x022b, exposure & 0xff },
++	};
++
++	return ccs_imx681_group_write(sensor, regs, ARRAY_SIZE(regs));
++}
++
++static int ccs_imx681_set_digital_gain(struct ccs_sensor *sensor, s32 value)
++{
++	u16 code = 0x0100 + clamp(value, 0, 960) * 4;
++	const struct ccs_reg_8 regs[] = {
++		{ 0x020e, code >> 8 },
++		{ 0x020f, code & 0xff },
++	};
++
++	return ccs_imx681_group_write(sensor, regs, ARRAY_SIZE(regs));
++}
++
++static int ccs_imx681_set_startup_controls(struct ccs_sensor *sensor,
++					   const struct ccs_imx681_mode *mode)
++{
++	u32 exposure = sensor->exposure->val;
++	u16 gain = 0x0100 + clamp(sensor->analogue_gain->val, 0, 960) * 4;
++	const struct ccs_reg_8 regs[] = {
++		/* Keep timing and the first exposure coherent when streaming starts. */
++		{ 0x033d, (mode->frame_length_lines >> 16) & 0xff },
++		{ 0x033e, (mode->frame_length_lines >> 8) & 0xff },
++		{ 0x033f, mode->frame_length_lines & 0xff },
++		{ 0x0229, (exposure >> 16) & 0xff },
++		{ 0x022a, (exposure >> 8) & 0xff },
++		{ 0x022b, exposure & 0xff },
++		/* Keep the analogue code at the reference sequence's zero value. */
++		{ 0x0204, 0x00 },
++		{ 0x0205, 0x00 },
++		{ 0x020e, gain >> 8 },
++		{ 0x020f, gain & 0xff },
++	};
++
++	return ccs_imx681_group_write(sensor, regs, ARRAY_SIZE(regs));
++}
++
++static u32 ccs_imx681_ticks_to_lines(const struct ccs_imx681_mode *mode,
++				     u32 ticks)
++{
++	return DIV64_U64_ROUND_CLOSEST((u64)ticks * mode->pixel_rate,
++				       10000000ULL * mode->line_length_pck);
++}
++
++static void ccs_imx681_exposure_range(struct ccs_sensor *sensor, int *min,
++				      int *max, int *step, int *def)
++{
++	const struct ccs_imx681_mode *mode = ccs_imx681_current_mode(sensor);
++	u32 margin = max(CCS_LIM(sensor, COARSE_INTEGRATION_TIME_MAX_MARGIN),
++			 1U);
++	u32 mode_max = mode->frame_length_lines > margin ?
++		mode->frame_length_lines - margin : 1;
++	u32 min_lines;
++	u32 max_lines;
++	u32 step_lines;
++	u32 default_lines;
++
++	/*
++	 * Windows exposes 100 ns ticks: 5000..2000000, step 10, default
++	 * 5000, with auto exposure enabled. Auto exposure remains userspace
++	 * policy; this control reports the converted manual line bounds.
++	 */
++	min_lines = ccs_imx681_ticks_to_lines(mode, IMX681_EXPOSURE_MIN_TICKS);
++	max_lines = ccs_imx681_ticks_to_lines(mode, IMX681_EXPOSURE_MAX_TICKS);
++	step_lines = ccs_imx681_ticks_to_lines(mode, IMX681_EXPOSURE_STEP_TICKS);
++	default_lines = mode->exposure_default;
++
++	*min = clamp_t(u32, min_lines, 1, mode_max);
++	*max = clamp_t(u32, max_lines, *min, mode_max);
++	*step = max_t(u32, step_lines, 1);
++	*def = clamp_t(u32, default_lines, *min, *max);
++}
++
+ static void __ccs_update_exposure_limits(struct ccs_sensor *sensor,
+ 					 const struct v4l2_rect *pa_src)
+ {
+ 	struct v4l2_ctrl *ctrl = sensor->exposure;
+-	int max;
++	int min, max, step, def;
++
++	if (ccs_is_imx681(sensor)) {
++		ccs_imx681_exposure_range(sensor, &min, &max, &step, &def);
++		__v4l2_ctrl_modify_range(ctrl, min, max, step, def);
++		return;
++	}
+ 
+ 	max = pa_src->height + sensor->vblank->val -
+ 		CCS_LIM(sensor, COARSE_INTEGRATION_TIME_MAX_MARGIN);
+@@ -650,18 +819,23 @@ static const char *pixel_order_str[] = { "GRBG", "RGGB", "BGGR", "GBRG" };
+ 				 - (unsigned long)ccs_csi_data_formats) \
+ 				/ sizeof(*ccs_csi_data_formats))
+ 
+-static u32 ccs_pixel_order(struct ccs_sensor *sensor)
++static u8 ccs_image_orientation(struct ccs_sensor *sensor)
+ {
+-	struct i2c_client *client = v4l2_get_subdevdata(&sensor->src->sd);
+-	int flip = 0;
++	u8 orient = 0;
+ 
+-	if (sensor->hflip) {
+-		if (sensor->hflip->val)
+-			flip |= CCS_IMAGE_ORIENTATION_HORIZONTAL_MIRROR;
++	if (sensor->hflip && sensor->hflip->val)
++		orient |= CCS_IMAGE_ORIENTATION_HORIZONTAL_MIRROR;
+ 
+-		if (sensor->vflip->val)
+-			flip |= CCS_IMAGE_ORIENTATION_VERTICAL_FLIP;
+-	}
++	if (sensor->vflip && sensor->vflip->val)
++		orient |= CCS_IMAGE_ORIENTATION_VERTICAL_FLIP;
++
++	return orient;
++}
++
++static u32 ccs_pixel_order(struct ccs_sensor *sensor)
++{
++	struct i2c_client *client = v4l2_get_subdevdata(&sensor->src->sd);
++	u8 flip = ccs_image_orientation(sensor);
+ 
+ 	dev_dbg(&client->dev, "flip %u\n", flip);
+ 	return sensor->default_pixel_order ^ flip;
+@@ -709,7 +883,6 @@ static int ccs_set_ctrl(struct v4l2_ctrl *ctrl)
+ 	struct v4l2_subdev_state *state;
+ 	const struct v4l2_rect *pa_src = NULL;
+ 	int pm_status;
+-	u32 orient = 0;
+ 	unsigned int i;
+ 	int exposure;
+ 	int rval;
+@@ -726,12 +899,6 @@ static int ccs_set_ctrl(struct v4l2_ctrl *ctrl)
+ 		if (sensor->streaming)
+ 			return -EBUSY;
+ 
+-		if (sensor->hflip->val)
+-			orient |= CCS_IMAGE_ORIENTATION_HORIZONTAL_MIRROR;
+-
+-		if (sensor->vflip->val)
+-			orient |= CCS_IMAGE_ORIENTATION_VERTICAL_FLIP;
+-
+ 		ccs_update_mbus_formats(sensor);
+ 
+ 		break;
+@@ -773,7 +940,16 @@ static int ccs_set_ctrl(struct v4l2_ctrl *ctrl)
+ 
+ 	switch (ctrl->id) {
+ 	case V4L2_CID_ANALOGUE_GAIN:
+-		rval = ccs_write(sensor, ANALOG_GAIN_CODE_GLOBAL, ctrl->val);
++		/*
++		 * The analogue gain register does not affect the Snapdragon IMX681,
++		 * while its global U8.8 digital gain does. Keep the standard
++		 * analogue-gain control that libcamera's simple IPA drives, but map
++		 * it to the effective register on this model.
++		 */
++		if (ccs_is_imx681(sensor))
++			rval = ccs_imx681_set_digital_gain(sensor, ctrl->val);
++		else
++			rval = ccs_write(sensor, ANALOG_GAIN_CODE_GLOBAL, ctrl->val);
+ 
+ 		break;
+ 
+@@ -820,12 +996,17 @@ static int ccs_set_ctrl(struct v4l2_ctrl *ctrl)
+ 
+ 		break;
+ 	case V4L2_CID_EXPOSURE:
+-		rval = ccs_write(sensor, COARSE_INTEGRATION_TIME, ctrl->val);
++		if (ccs_is_imx681(sensor))
++			rval = ccs_imx681_set_exposure(sensor, ctrl->val);
++		else
++			rval = ccs_write(sensor, COARSE_INTEGRATION_TIME,
++					 ctrl->val);
+ 
+ 		break;
+ 	case V4L2_CID_HFLIP:
+ 	case V4L2_CID_VFLIP:
+-		rval = ccs_write(sensor, IMAGE_ORIENTATION, orient);
++		rval = ccs_write(sensor, IMAGE_ORIENTATION,
++				 ccs_image_orientation(sensor));
+ 
+ 		break;
+ 	case V4L2_CID_VBLANK:
+@@ -894,6 +1075,8 @@ static int ccs_init_controls(struct ccs_sensor *sensor)
+ {
+ 	struct i2c_client *client = v4l2_get_subdevdata(&sensor->src->sd);
+ 	struct v4l2_fwnode_device_properties props;
++	int exposure_min = 0, exposure_max = 0;
++	int exposure_step = 1, exposure_def = 0;
+ 	int rval;
+ 
+ 	rval = v4l2_ctrl_handler_init(&sensor->pixel_array->ctrl_handler, 19);
+@@ -911,6 +1094,17 @@ static int ccs_init_controls(struct ccs_sensor *sensor)
+ 	if (rval)
+ 		return rval;
+ 
++	if (ccs_is_imx681(sensor)) {
++		const struct ccs_imx681_mode *mode =
++			ccs_imx681_current_mode(sensor);
++
++		sensor->analogue_gain =
++			v4l2_ctrl_new_std(&sensor->pixel_array->ctrl_handler,
++					  &ccs_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
++					  0, 960, 1, mode->gain_default);
++		goto gain_controls_done;
++	}
++
+ 	switch (CCS_LIM(sensor, ANALOG_GAIN_CAPABILITY)) {
+ 	case CCS_ANALOG_GAIN_CAPABILITY_GLOBAL: {
+ 		struct {
+@@ -945,13 +1139,14 @@ static int ccs_init_controls(struct ccs_sensor *sensor)
+ 					     &ctrl_cfg, NULL);
+ 		}
+ 
+-		v4l2_ctrl_new_std(&sensor->pixel_array->ctrl_handler,
+-				  &ccs_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
+-				  CCS_LIM(sensor, ANALOG_GAIN_CODE_MIN),
+-				  CCS_LIM(sensor, ANALOG_GAIN_CODE_MAX),
+-				  max(CCS_LIM(sensor, ANALOG_GAIN_CODE_STEP),
+-				      1U),
+-				  CCS_LIM(sensor, ANALOG_GAIN_CODE_MIN));
++		sensor->analogue_gain =
++			v4l2_ctrl_new_std(&sensor->pixel_array->ctrl_handler,
++					  &ccs_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
++					  CCS_LIM(sensor, ANALOG_GAIN_CODE_MIN),
++					  CCS_LIM(sensor, ANALOG_GAIN_CODE_MAX),
++					  max(CCS_LIM(sensor,
++						      ANALOG_GAIN_CODE_STEP), 1U),
++					  CCS_LIM(sensor, ANALOG_GAIN_CODE_MIN));
+ 	}
+ 		break;
+ 
+@@ -999,6 +1194,8 @@ static int ccs_init_controls(struct ccs_sensor *sensor)
+ 	}
+ 	}
+ 
++gain_controls_done:
++
+ 	if (CCS_LIM(sensor, SHADING_CORRECTION_CAPABILITY) &
+ 	    (CCS_SHADING_CORRECTION_CAPABILITY_COLOR_SHADING |
+ 	     CCS_SHADING_CORRECTION_CAPABILITY_LUMINANCE_CORRECTION)) {
+@@ -1032,22 +1229,29 @@ static int ccs_init_controls(struct ccs_sensor *sensor)
+ 					     &ctrl_cfg, NULL);
+ 	}
+ 
+-	if (CCS_LIM(sensor, DIGITAL_GAIN_CAPABILITY) ==
+-	    CCS_DIGITAL_GAIN_CAPABILITY_GLOBAL ||
+-	    CCS_LIM(sensor, DIGITAL_GAIN_CAPABILITY) ==
+-	    SMIAPP_DIGITAL_GAIN_CAPABILITY_PER_CHANNEL)
+-		v4l2_ctrl_new_std(&sensor->pixel_array->ctrl_handler,
+-				  &ccs_ctrl_ops, V4L2_CID_DIGITAL_GAIN,
+-				  CCS_LIM(sensor, DIGITAL_GAIN_MIN),
+-				  CCS_LIM(sensor, DIGITAL_GAIN_MAX),
+-				  max(CCS_LIM(sensor, DIGITAL_GAIN_STEP_SIZE),
+-				      1U),
+-				  0x100);
+-
+-	/* Exposure limits will be updated soon, use just something here. */
++	if (!ccs_is_imx681(sensor) &&
++	    (CCS_LIM(sensor, DIGITAL_GAIN_CAPABILITY) ==
++	     CCS_DIGITAL_GAIN_CAPABILITY_GLOBAL ||
++	     CCS_LIM(sensor, DIGITAL_GAIN_CAPABILITY) ==
++	     SMIAPP_DIGITAL_GAIN_CAPABILITY_PER_CHANNEL))
++		sensor->digital_gain =
++			v4l2_ctrl_new_std(&sensor->pixel_array->ctrl_handler,
++					  &ccs_ctrl_ops, V4L2_CID_DIGITAL_GAIN,
++					  CCS_LIM(sensor, DIGITAL_GAIN_MIN),
++					  CCS_LIM(sensor, DIGITAL_GAIN_MAX),
++					  max(CCS_LIM(sensor,
++						      DIGITAL_GAIN_STEP_SIZE), 1U),
++					  0x100);
++
++	if (ccs_is_imx681(sensor))
++		ccs_imx681_exposure_range(sensor, &exposure_min, &exposure_max,
++					  &exposure_step, &exposure_def);
++
++	/* Generic exposure limits will be updated after state initialisation. */
+ 	sensor->exposure = v4l2_ctrl_new_std(
+ 		&sensor->pixel_array->ctrl_handler, &ccs_ctrl_ops,
+-		V4L2_CID_EXPOSURE, 0, 0, 1, 0);
++		V4L2_CID_EXPOSURE, exposure_min, exposure_max, exposure_step,
++		exposure_def);
+ 
+ 	sensor->hflip = v4l2_ctrl_new_std(
+ 		&sensor->pixel_array->ctrl_handler, &ccs_ctrl_ops,
+@@ -1056,6 +1260,11 @@ static int ccs_init_controls(struct ccs_sensor *sensor)
+ 		&sensor->pixel_array->ctrl_handler, &ccs_ctrl_ops,
+ 		V4L2_CID_VFLIP, 0, 1, 1, 0);
+ 
++	if (sensor->hflip)
++		sensor->hflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
++	if (sensor->vflip)
++		sensor->vflip->flags |= V4L2_CTRL_FLAG_MODIFY_LAYOUT;
++
+ 	sensor->vblank = v4l2_ctrl_new_std(
+ 		&sensor->pixel_array->ctrl_handler, &ccs_ctrl_ops,
+ 		V4L2_CID_VBLANK, 0, 1, 1, 0);
+@@ -1214,6 +1423,16 @@ static int ccs_get_mbus_formats(struct ccs_sensor *sensor)
+ 		}
+ 	}
+ 
++	if (ccs_is_imx681(sensor)) {
++		for (i = 0; i < ARRAY_SIZE(ccs_csi_data_formats); i++) {
++			const struct ccs_csi_data_format *f =
++				&ccs_csi_data_formats[i];
++
++			if (f->width != 10 || f->compressed != 10)
++				sensor->default_mbus_frame_fmts &= ~BIT_U64(i);
++		}
++	}
++
+ 	/* Figure out which BPP values can be used with which formats. */
+ 	pll->binning_horizontal = 1;
+ 	pll->binning_vertical = 1;
+@@ -1296,6 +1515,17 @@ static void ccs_update_blanking(struct ccs_sensor *sensor,
+ 	u16 min_fll, max_fll, min_llp, max_llp, min_lbp;
+ 	int min, max;
+ 	u8 binh, binv;
++	const struct ccs_imx681_mode *mode;
++
++	mode = ccs_imx681_current_mode(sensor);
++	if (mode) {
++		min = mode->frame_length_lines - mode->height;
++		__v4l2_ctrl_modify_range(vblank, min, min, 1, min);
++		min = mode->line_length_pck - mode->width;
++		__v4l2_ctrl_modify_range(hblank, min, min, 1, min);
++		__ccs_update_exposure_limits(sensor, pa_src);
++		return;
++	}
+ 
+ 	ccs_get_binning(sensor, NULL, &binh, &binv);
+ 
+@@ -1851,6 +2081,90 @@ static int ccs_pm_get_init(struct ccs_sensor *sensor)
+ 	return rval;
+ }
+ 
++static int ccs_imx681_write_regs(struct ccs_sensor *sensor,
++				 const struct ccs_reg_8 *regs,
++				 unsigned int num_regs, bool mode_regs)
++{
++	unsigned int i;
++	int ret;
++
++	if (!ccs_is_imx681(sensor))
++		return -EINVAL;
++
++	for (i = 0; i < num_regs; i++) {
++		u16 reg = regs[i].reg;
++
++		if (mode_regs && (imx681_mode_skip & BIT(0)) && reg == 0x0114)
++			continue;
++		if (mode_regs && (imx681_mode_skip & BIT(1)) &&
++		    reg >= 0x0300 && reg <= 0x030f)
++			continue;
++
++		ret = ccs_write_addr(sensor, CCI_REG8(reg), regs[i].val);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++
++static int ccs_imx681_start_streaming(struct ccs_sensor *sensor)
++{
++	const struct ccs_imx681_mode *mode = ccs_imx681_current_mode(sensor);
++	struct i2c_client *client = v4l2_get_subdevdata(&sensor->src->sd);
++	int ret;
++
++	if (!mode)
++		return -EINVAL;
++
++	if (!(imx681_mode_skip & BIT(2))) {
++		ret = ccs_imx681_write_regs(sensor, imx681_vendor_init,
++					    ARRAY_SIZE(imx681_vendor_init), false);
++		if (ret)
++			return ret;
++	}
++
++	ret = ccs_imx681_write_regs(sensor, mode->regs, mode->num_regs, true);
++	if (ret)
++		return ret;
++
++	/* The fixed mode table resets 0x0101; restore the requested Bayer layout. */
++	ret = ccs_write(sensor, IMAGE_ORIENTATION,
++			ccs_image_orientation(sensor));
++	if (ret)
++		return ret;
++
++	usleep_range(10000, 11000);
++
++	ret = ccs_imx681_set_startup_controls(sensor, mode);
++	if (ret)
++		return ret;
++
++	dev_dbg(&client->dev, "IMX681 mode %ux%u, skip mask %#x\n",
++		mode->width, mode->height, imx681_mode_skip);
++
++	return 0;
++}
++
++static void ccs_imx681_log_stream_state(struct ccs_sensor *sensor,
++					const char *phase)
++{
++	struct i2c_client *client = v4l2_get_subdevdata(&sensor->src->sd);
++	u32 frame_count = 0;
++	u32 mode_select = 0;
++	int frame_ret;
++	int mode_ret;
++
++	mode_ret = ccs_read_addr_noconv(sensor, CCS_R_MODE_SELECT,
++					&mode_select);
++	frame_ret = ccs_read_addr_noconv(sensor, CCS_R_FRAME_COUNT,
++					 &frame_count);
++
++	dev_info(&client->dev,
++		 "IMX681 %s: MODE_SELECT ret=%d val=%#04x FRAME_COUNT ret=%d val=%#04x\n",
++		 phase, mode_ret, mode_select, frame_ret, frame_count);
++}
++
+ static int ccs_enable_streams(struct v4l2_subdev *subdev,
+ 			      struct v4l2_subdev_state *state, u32 pad,
+ 			      u64 streams_mask)
+@@ -1870,6 +2184,9 @@ static int ccs_enable_streams(struct v4l2_subdev *subdev,
+ 	u8 binning_mode, binh, binv;
+ 	int rval;
+ 
++	if (ccs_is_imx681(sensor) && subdev != &sensor->src->sd)
++		return 0;
++
+ 	if (pad != CCS_PAD_SRC)
+ 		return -EINVAL;
+ 
+@@ -1999,7 +2316,24 @@ static int ccs_enable_streams(struct v4l2_subdev *subdev,
+ 		goto err_pm_put;
+ 	}
+ 
++	if (ccs_is_imx681(sensor)) {
++		rval = ccs_imx681_start_streaming(sensor);
++		if (rval)
++			goto err_pm_put;
++
++		ccs_imx681_log_stream_state(sensor, "pre-streamon");
++	}
++
+ 	rval = ccs_write(sensor, MODE_SELECT, CCS_MODE_SELECT_STREAMING);
++	if (rval)
++		goto err_pm_put;
++	if (ccs_is_imx681(sensor)) {
++		ccs_imx681_log_stream_state(sensor, "post-streamon");
++
++		/* One expected frame is about 64 ms; keep this probe nonfatal. */
++		usleep_range(100000, 101000);
++		ccs_imx681_log_stream_state(sensor, "active-100ms");
++	}
+ 
+ 	sensor->streaming |= streams_mask;
+ 
+@@ -2019,6 +2353,9 @@ static int ccs_disable_streams(struct v4l2_subdev *subdev,
+ 	struct i2c_client *client = v4l2_get_subdevdata(&sensor->src->sd);
+ 	int rval;
+ 
++	if (ccs_is_imx681(sensor) && subdev != &sensor->src->sd)
++		return 0;
++
+ 	if (pad != CCS_PAD_SRC)
+ 		return -EINVAL;
+ 
+@@ -2026,13 +2363,20 @@ static int ccs_disable_streams(struct v4l2_subdev *subdev,
+ 	if (sensor->streaming)
+ 		return 0;
+ 
++	if (ccs_is_imx681(sensor))
++		ccs_imx681_log_stream_state(sensor, "pre-streamoff");
++
+ 	rval = ccs_write(sensor, MODE_SELECT, CCS_MODE_SELECT_SOFTWARE_STANDBY);
+-	if (rval)
+-		return rval;
++	if (rval) {
++		dev_warn(&client->dev,
++			 "failed to enter standby: %d; scheduling power-down\n",
++			 rval);
++	} else {
++		int quirk_rval = ccs_call_quirk(sensor, post_streamoff);
+ 
+-	rval = ccs_call_quirk(sensor, post_streamoff);
+-	if (rval)
+-		dev_err(&client->dev, "post_streamoff quirks failed\n");
++		if (quirk_rval)
++			dev_err(&client->dev, "post_streamoff quirks failed\n");
++	}
+ 
+ 	pm_runtime_put_autosuspend(&client->dev);
+ 
+@@ -2045,6 +2389,9 @@ static int ccs_pre_streamon(struct v4l2_subdev *subdev, u32 flags)
+ 	struct i2c_client *client = v4l2_get_subdevdata(&sensor->src->sd);
+ 	int rval;
+ 
++	if (ccs_is_imx681(sensor) && subdev != &sensor->src->sd)
++		return 0;
++
+ 	if (flags & V4L2_SUBDEV_PRE_STREAMON_FL_MANUAL_LP) {
+ 		switch (sensor->hwcfg.csi_signalling_mode) {
+ 		case CCS_CSI_SIGNALING_MODE_CSI_2_DPHY:
+@@ -2082,6 +2429,9 @@ static int ccs_post_streamoff(struct v4l2_subdev *subdev)
+ 	struct ccs_sensor *sensor = to_ccs_sensor(subdev);
+ 	struct i2c_client *client = v4l2_get_subdevdata(&sensor->src->sd);
+ 
++	if (ccs_is_imx681(sensor) && subdev != &sensor->src->sd)
++		return 0;
++
+ 	pm_runtime_put(&client->dev);
+ 
+ 	return 0;
+@@ -2147,6 +2497,30 @@ static u32 ccs_get_mbus_code(struct v4l2_subdev *subdev, unsigned int pad)
+ 		return sensor->internal_csi_format->code;
+ }
+ 
++static int ccs_enum_frame_size(struct v4l2_subdev *subdev,
++			       struct v4l2_subdev_state *sd_state,
++			       struct v4l2_subdev_frame_size_enum *fse)
++{
++	struct ccs_subdev *ssd = to_ccs_subdev(subdev);
++	struct ccs_sensor *sensor = ssd->sensor;
++	const struct ccs_imx681_mode *mode;
++
++	if (!ccs_is_imx681(sensor) || fse->pad != ssd->source_pad ||
++	    fse->index)
++		return -EINVAL;
++
++	if (fse->code != ccs_get_mbus_code(subdev, fse->pad))
++		return -EINVAL;
++
++	mode = ccs_imx681_current_mode(sensor);
++	fse->min_width = mode->width;
++	fse->max_width = mode->width;
++	fse->min_height = mode->height;
++	fse->max_height = mode->height;
++
++	return 0;
++}
++
+ static int ccs_get_format(struct v4l2_subdev *subdev,
+ 			  struct v4l2_subdev_state *sd_state,
+ 			  struct v4l2_subdev_format *fmt)
+@@ -2182,6 +2556,17 @@ static void ccs_propagate(struct v4l2_subdev *subdev,
+ 						   CCS_STREAM_PIXEL);
+ 		fmt->width = comp->width;
+ 		fmt->height = comp->height;
++		if (ssd == ssd->sensor->src && ccs_is_imx681(ssd->sensor)) {
++			const struct ccs_imx681_mode *mode =
++				ccs_imx681_current_mode(ssd->sensor);
++
++			crop->left = 0;
++			crop->top = 0;
++			crop->width = mode->width;
++			crop->height = mode->height;
++			fmt->width = mode->width;
++			fmt->height = mode->height;
++		}
+ 		break;
+ 	default:
+ 		WARN_ON_ONCE(1);
+@@ -2586,6 +2971,16 @@ static void ccs_get_native_size(struct ccs_subdev *ssd, struct v4l2_rect *r)
+ 	r->height = CCS_LIM(ssd->sensor, Y_ADDR_MAX) + 1;
+ }
+ 
++static void ccs_get_active_size(struct ccs_subdev *ssd, struct v4l2_rect *r)
++{
++	ccs_get_native_size(ssd, r);
++
++	if (ccs_is_imx681(ssd->sensor)) {
++		r->width = 4032;
++		r->height = 3024;
++	}
++}
++
+ static int ccs_get_selection(struct v4l2_subdev *subdev,
+ 			     struct v4l2_subdev_state *sd_state,
+ 			     struct v4l2_subdev_selection *sel)
+@@ -2605,10 +3000,24 @@ static int ccs_get_selection(struct v4l2_subdev *subdev,
+ 					     CCS_STREAM_PIXEL);
+ 
+ 	switch (sel->target) {
+-	case V4L2_SEL_TGT_CROP_BOUNDS:
+ 	case V4L2_SEL_TGT_NATIVE_SIZE:
+ 		if (ssd == sensor->pixel_array) {
+ 			ccs_get_native_size(ssd, &sel->r);
++		} else if (sel->pad == ssd->sink_pad) {
++			struct v4l2_mbus_framefmt *sink_fmt =
++				v4l2_subdev_state_get_format(sd_state,
++							     ssd->sink_pad);
++			sel->r.top = 0;
++			sel->r.left = 0;
++			sel->r.width = sink_fmt->width;
++			sel->r.height = sink_fmt->height;
++		} else {
++			sel->r = *comp;
++		}
++		break;
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++		if (ssd == sensor->pixel_array) {
++			ccs_get_active_size(ssd, &sel->r);
+ 		} else if (sel->pad == ssd->sink_pad) {
+ 			struct v4l2_mbus_framefmt *sink_fmt =
+ 				v4l2_subdev_state_get_format(sd_state,
+@@ -2920,6 +3329,21 @@ static int ccs_identify_module(struct ccs_sensor *sensor)
+ 		break;
+ 	}
+ 
++	/* Sensor identities are distinct from the replaceable module tuple. */
++	for (i = 0; i < ARRAY_SIZE(ccs_sensor_idents); i++) {
++		const struct ccs_sensor_ident *ident = &ccs_sensor_idents[i];
++
++		if (ident->manufacturer_id !=
++		    minfo->sensor_mipi_manufacturer_id ||
++		    ident->model_id != minfo->sensor_model_id ||
++		    ident->revision != minfo->sensor_revision_number)
++			continue;
++
++		minfo->name = ident->name;
++		minfo->quirk = ident->quirk;
++		break;
++	}
++
+ 	dev_dbg(&client->dev, "the sensor is called %s\n", minfo->name);
+ 
+ 	return 0;
+@@ -3080,7 +3504,7 @@ static int ccs_init_state(struct v4l2_subdev *sd,
+ 	struct v4l2_rect *crop =
+ 		v4l2_subdev_state_get_crop(sd_state, pad);
+ 
+-	ccs_get_native_size(ssd, crop);
++	ccs_get_active_size(ssd, crop);
+ 
+ 	fmt->width = crop->width;
+ 	fmt->height = crop->height;
+@@ -3108,6 +3532,7 @@ static const struct v4l2_subdev_video_ops ccs_video_ops = {
+ 
+ static const struct v4l2_subdev_pad_ops ccs_pad_ops = {
+ 	.enum_mbus_code = ccs_enum_mbus_code,
++	.enum_frame_size = ccs_enum_frame_size,
+ 	.get_fmt = ccs_get_format,
+ 	.set_fmt = ccs_set_format,
+ 	.get_selection = ccs_get_selection,
+diff --git a/drivers/media/i2c/ccs/ccs-imx681-init.h b/drivers/media/i2c/ccs/ccs-imx681-init.h
+new file mode 100644
+index 000000000..cd0600d31
+--- /dev/null
++++ b/drivers/media/i2c/ccs/ccs-imx681-init.h
+@@ -0,0 +1,74 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Sony IMX681 3844x2640, 969.6-Msymbol/s Linux mode based on the Andre
++ * Gilerson table from linux-surface-kernel and validated by the Snapdragon
++ * reference port. It is distinct from the static Windows 3840x2640,
++ * 1.2-Gsymbol/s mode. Multi-byte registers remain byte-split to preserve the
++ * proven write order.
++ */
++
++#ifndef __CCS_IMX681_INIT_H__
++#define __CCS_IMX681_INIT_H__
++
++static const struct ccs_reg_8 imx681_mode_3844x2640_regs[] = {
++	/* Software standby and 19.2 MHz external clock. */
++	{ 0x0100, 0x00 },
++	{ 0x0136, 0x13 },
++	{ 0x0137, 0x33 },
++	{ 0x002c, 0x05 },
++	{ 0x002d, 0x05 },
++	/* C-PHY, RAW10, one trio; the requested orientation is restored later. */
++	{ 0x0110, 0x00 },
++	{ 0x0111, 0x03 },
++	{ 0x0112, 0x0a },
++	{ 0x0113, 0x0a },
++	{ 0x0114, 0x00 },
++	{ 0x0101, 0x00 },
++	/* Vendor unlock sequence; ordering is significant. */
++	{ 0x30eb, 0x05 },
++	{ 0x30eb, 0x0c },
++	{ 0x300a, 0xff },
++	{ 0x300b, 0xff },
++	{ 0x3532, 0xff },
++	{ 0x3533, 0xff },
++	/*
++	 * LLP 8704 leaves about 13 percent line-idle headroom. The earlier
++	 * 7552 value caused periodic receiver FIFO overruns.
++	 */
++	{ 0x0342, 0x22 },
++	{ 0x0343, 0x00 },
++	/* Frame length is 3177 lines. */
++	{ 0x033d, 0x00 },
++	{ 0x033e, 0x0c },
++	{ 0x033f, 0x69 },
++	/* Analogue crop window from the proven Gilerson sequence. */
++	{ 0x0345, 0x64 },
++	{ 0x0346, 0x01 },
++	{ 0x0347, 0x00 },
++	{ 0x0349, 0x67 },
++	{ 0x034a, 0x0b },
++	{ 0x034b, 0x4f },
++	{ 0x040d, 0x04 },
++	{ 0x040e, 0x0a },
++	{ 0x040f, 0x50 },
++	/* The sensor emits 3844x2640; any 3840 crop belongs downstream. */
++	{ 0x034c, 0x0f },
++	{ 0x034d, 0x04 },
++	{ 0x034e, 0x0a },
++	{ 0x034f, 0x50 },
++	/*
++	 * Preserve the branch dividers selected by the CCS PLL calculator and
++	 * override only the multipliers from the hardware-proven Snapdragon
++	 * sequence.  The 0097c12-derived complete divider tuple produced no C-PHY
++	 * packets on this device.
++	 */
++	{ 0x0307, 0xe1 },
++	{ 0x030d, 0x03 },
++	{ 0x030e, 0x01 },
++	{ 0x030f, 0x2f },
++	{ 0x7e9b, 0x02 },
++	{ 0x0368, 0x00 },
++	{ 0xd383, 0x01 },
++};
++
++#endif /* __CCS_IMX681_INIT_H__ */
+diff --git a/drivers/media/i2c/ccs/ccs-imx681-mode.h b/drivers/media/i2c/ccs/ccs-imx681-mode.h
+new file mode 100644
+index 000000000..e81ce293a
+--- /dev/null
++++ b/drivers/media/i2c/ccs/ccs-imx681-mode.h
+@@ -0,0 +1,33 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/* Sony IMX681 mode validated on the Surface Pro 11 C-PHY receiver. */
++
++#ifndef __CCS_IMX681_MODE_H__
++#define __CCS_IMX681_MODE_H__
++
++struct ccs_imx681_mode {
++	const struct ccs_reg_8 *regs;
++	size_t num_regs;
++	u32 width;
++	u32 height;
++	u32 line_length_pck;
++	u32 frame_length_lines;
++	u32 pixel_rate;
++	u32 exposure_default;
++	u32 gain_default;
++};
++
++static const struct ccs_imx681_mode imx681_mode = {
++	.regs = imx681_mode_3844x2640_regs,
++	.num_regs = ARRAY_SIZE(imx681_mode_3844x2640_regs),
++	.width = 3844,
++	.height = 2640,
++	.line_length_pck = 8704,
++	.frame_length_lines = 3177,
++	.pixel_rate = 432000000,
++	/* Initial values from the hardware-proven Snapdragon stream recipe. */
++	.exposure_default = 3100,
++	/* Control value 192 maps to global U8.8 code 0x0400 (4x). */
++	.gain_default = 192,
++};
++
++#endif /* __CCS_IMX681_MODE_H__ */
+diff --git a/drivers/media/i2c/ccs/ccs-imx681-vendor.h b/drivers/media/i2c/ccs/ccs-imx681-vendor.h
+new file mode 100644
+index 000000000..c66250e33
+--- /dev/null
++++ b/drivers/media/i2c/ccs/ccs-imx681-vendor.h
+@@ -0,0 +1,375 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Full Snapdragon Surface Pro 11 IMX681 manufacturer initialisation from
++ * com.surface.sensormodule.ffc_imx681.bin. Registers 0x0136, 0x0137 and
++ * 0x0111 are deliberately supplied by the selected mode table instead.
++ */
++
++#ifndef __CCS_IMX681_VENDOR_H__
++#define __CCS_IMX681_VENDOR_H__
++
++static const struct ccs_reg_8 imx681_vendor_init[] = {
++	{ 0x002c, 0x05 },
++	{ 0x002d, 0x05 },
++	{ 0x30eb, 0x05 },
++	{ 0x30eb, 0x0c },
++	{ 0x300a, 0xff },
++	{ 0x300b, 0xff },
++	{ 0x3532, 0xff },
++	{ 0x3533, 0xff },
++	{ 0x051e, 0x00 },
++	{ 0x0905, 0x04 },
++	{ 0x2029, 0x01 },
++	{ 0x202a, 0x11 },
++	{ 0x20a1, 0x00 },
++	{ 0x20a2, 0x02 },
++	{ 0x20a3, 0x03 },
++	{ 0x20ac, 0x01 },
++	{ 0x20ad, 0x01 },
++	{ 0x20ae, 0x01 },
++	{ 0x20af, 0x01 },
++	{ 0x20b0, 0x00 },
++	{ 0x20b1, 0x01 },
++	{ 0x20b2, 0x02 },
++	{ 0x20b3, 0x03 },
++	{ 0x706f, 0x00 },
++	{ 0x7130, 0x08 },
++	{ 0x7131, 0x08 },
++	{ 0x7408, 0x89 },
++	{ 0x7437, 0x3d },
++	{ 0x7439, 0x29 },
++	{ 0x7443, 0x38 },
++	{ 0x7447, 0x55 },
++	{ 0x744b, 0x00 },
++	{ 0x7451, 0x8e },
++	{ 0x746d, 0x29 },
++	{ 0x747d, 0x68 },
++	{ 0x7481, 0x60 },
++	{ 0x7491, 0x2d },
++	{ 0x7493, 0x31 },
++	{ 0x74a5, 0x52 },
++	{ 0x74af, 0x4a },
++	{ 0x74b5, 0x1f },
++	{ 0x74b7, 0x31 },
++	{ 0x74bd, 0x75 },
++	{ 0x74c5, 0x06 },
++	{ 0x74c9, 0x52 },
++	{ 0x74d3, 0x4a },
++	{ 0x74d9, 0x1f },
++	{ 0x74db, 0x31 },
++	{ 0x74e1, 0x75 },
++	{ 0x74e9, 0x06 },
++	{ 0x74ed, 0x52 },
++	{ 0x74f7, 0x4a },
++	{ 0x74fd, 0x1f },
++	{ 0x74ff, 0x31 },
++	{ 0x7505, 0x75 },
++	{ 0x750d, 0x06 },
++	{ 0x7537, 0x38 },
++	{ 0x753d, 0x4a },
++	{ 0x753f, 0x4a },
++	{ 0x7541, 0x4a },
++	{ 0x7549, 0x8e },
++	{ 0x754f, 0x75 },
++	{ 0x7551, 0x75 },
++	{ 0x7553, 0x75 },
++	{ 0x792b, 0x39 },
++	{ 0x792d, 0x43 },
++	{ 0x79d3, 0x25 },
++	{ 0x79d6, 0x8e },
++	{ 0x79d7, 0x01 },
++	{ 0x79d8, 0xe7 },
++	{ 0x79d9, 0x25 },
++	{ 0x79db, 0x76 },
++	{ 0x79dc, 0x8e },
++	{ 0x79dd, 0x01 },
++	{ 0x79de, 0xe7 },
++	{ 0x79df, 0x25 },
++	{ 0x79e1, 0x76 },
++	{ 0x79e2, 0x8e },
++	{ 0x79e3, 0x01 },
++	{ 0x79e4, 0xe7 },
++	{ 0x79e5, 0x25 },
++	{ 0x79e7, 0x76 },
++	{ 0x79e8, 0x8e },
++	{ 0x7a01, 0xff },
++	{ 0x7a29, 0x6c },
++	{ 0x7a2b, 0xda },
++	{ 0x7a34, 0x6c },
++	{ 0x7a37, 0xda },
++	{ 0x7a40, 0x6c },
++	{ 0x7a43, 0xda },
++	{ 0x7b08, 0x00 },
++	{ 0x7b09, 0x01 },
++	{ 0x7c03, 0x38 },
++	{ 0x7c09, 0x4a },
++	{ 0x7c0b, 0x4a },
++	{ 0x7c0d, 0x4a },
++	{ 0x7c13, 0x8e },
++	{ 0x7c19, 0x75 },
++	{ 0x7c1b, 0x75 },
++	{ 0x7c1d, 0x75 },
++	{ 0x7c90, 0x00 },
++	{ 0x7c91, 0x00 },
++	{ 0x7c92, 0x00 },
++	{ 0x7c9d, 0x01 },
++	{ 0x7c9e, 0x01 },
++	{ 0x7c9f, 0x01 },
++	{ 0x7e9b, 0x07 },
++	{ 0x7f09, 0x00 },
++	{ 0x7f36, 0x00 },
++	{ 0x7f4f, 0x0a },
++	{ 0x7f50, 0x0a },
++	{ 0x7f51, 0x0a },
++	{ 0x7f55, 0x05 },
++	{ 0x7f56, 0x05 },
++	{ 0x7f57, 0x05 },
++	{ 0x7f5b, 0x03 },
++	{ 0x7f5c, 0x03 },
++	{ 0x7f5d, 0x03 },
++	{ 0x7f61, 0x03 },
++	{ 0x7f62, 0x03 },
++	{ 0x7f63, 0x03 },
++	{ 0x7f67, 0x03 },
++	{ 0x7f68, 0x03 },
++	{ 0x7f69, 0x03 },
++	{ 0x7f6a, 0x05 },
++	{ 0x7f6b, 0x05 },
++	{ 0x7f6c, 0x05 },
++	{ 0x7f6d, 0x11 },
++	{ 0x7f6e, 0x14 },
++	{ 0x7f6f, 0x14 },
++	{ 0x7f73, 0x14 },
++	{ 0x7f74, 0x1c },
++	{ 0x7f75, 0x14 },
++	{ 0x7f76, 0x08 },
++	{ 0x7f79, 0x14 },
++	{ 0x7f7a, 0x1c },
++	{ 0x7f7b, 0x14 },
++	{ 0x7f7f, 0x1c },
++	{ 0x7f80, 0x1c },
++	{ 0x7f81, 0x1c },
++	{ 0x7f85, 0x1c },
++	{ 0x7f86, 0x1c },
++	{ 0x7f87, 0x1c },
++	{ 0x7f9d, 0x09 },
++	{ 0x7f9e, 0x09 },
++	{ 0x7f9f, 0x09 },
++	{ 0x7fa3, 0x09 },
++	{ 0x7fa4, 0x09 },
++	{ 0x7fa5, 0x09 },
++	{ 0x7fac, 0x00 },
++	{ 0x7fad, 0x00 },
++	{ 0x7fae, 0x00 },
++	{ 0x7faf, 0x00 },
++	{ 0x7fb0, 0x00 },
++	{ 0x7fb1, 0x00 },
++	{ 0x7fb2, 0x00 },
++	{ 0x7fb3, 0x00 },
++	{ 0x7fb4, 0x00 },
++	{ 0x7fb5, 0x00 },
++	{ 0x7fb6, 0x00 },
++	{ 0x7fb7, 0x00 },
++	{ 0x7fb8, 0x00 },
++	{ 0x7fb9, 0x00 },
++	{ 0x7fba, 0x00 },
++	{ 0x7fbb, 0x00 },
++	{ 0x7fbc, 0x00 },
++	{ 0x7fbd, 0x00 },
++	{ 0x7fbe, 0x00 },
++	{ 0x7fbf, 0x00 },
++	{ 0x7fc0, 0x00 },
++	{ 0x7fc1, 0x00 },
++	{ 0x7fc2, 0x00 },
++	{ 0x7fc3, 0x00 },
++	{ 0x7fcb, 0x37 },
++	{ 0x7fcd, 0x37 },
++	{ 0x7fcf, 0x37 },
++	{ 0x7fd7, 0x44 },
++	{ 0x7fd9, 0x44 },
++	{ 0x7fdb, 0x44 },
++	{ 0x7fdd, 0x38 },
++	{ 0x7fe3, 0x4a },
++	{ 0x7fe5, 0x4a },
++	{ 0x7fe7, 0x4a },
++	{ 0x7fef, 0x4a },
++	{ 0x7ff1, 0x4a },
++	{ 0x7ff3, 0x4a },
++	{ 0x7ffb, 0x4a },
++	{ 0x7ffd, 0x4a },
++	{ 0x7fff, 0x4a },
++	{ 0x8007, 0x62 },
++	{ 0x8009, 0x62 },
++	{ 0x800b, 0x62 },
++	{ 0x8013, 0x6f },
++	{ 0x8015, 0x6f },
++	{ 0x8017, 0x6f },
++	{ 0x8019, 0x8e },
++	{ 0x801f, 0x75 },
++	{ 0x8021, 0x75 },
++	{ 0x8023, 0x75 },
++	{ 0x802b, 0x75 },
++	{ 0x802d, 0x75 },
++	{ 0x802f, 0x75 },
++	{ 0x8037, 0x75 },
++	{ 0x8039, 0x75 },
++	{ 0x803b, 0x75 },
++	{ 0x803c, 0x13 },
++	{ 0x803d, 0x17 },
++	{ 0x803e, 0x15 },
++	{ 0x803f, 0x11 },
++	{ 0x8040, 0x0a },
++	{ 0x8041, 0x08 },
++	{ 0x8047, 0x17 },
++	{ 0x80f0, 0x24 },
++	{ 0x80f1, 0x1b },
++	{ 0x80f2, 0x1a },
++	{ 0x80f3, 0x14 },
++	{ 0x80f4, 0x14 },
++	{ 0x80f5, 0x12 },
++	{ 0x80f6, 0x25 },
++	{ 0x80f7, 0x1c },
++	{ 0x80f8, 0x1b },
++	{ 0x80f9, 0x18 },
++	{ 0x80fa, 0x17 },
++	{ 0x80fb, 0x18 },
++	{ 0x80fc, 0x26 },
++	{ 0x80fd, 0x1e },
++	{ 0x80fe, 0x1d },
++	{ 0x80ff, 0x1c },
++	{ 0x8100, 0x1b },
++	{ 0x8101, 0x1c },
++	{ 0x8102, 0x27 },
++	{ 0x8103, 0x1e },
++	{ 0x8104, 0x1d },
++	{ 0x8105, 0x1e },
++	{ 0x8106, 0x1e },
++	{ 0x8107, 0x1e },
++	{ 0x8108, 0x27 },
++	{ 0x8109, 0x1e },
++	{ 0x810a, 0x1e },
++	{ 0x810b, 0x1e },
++	{ 0x810c, 0x1e },
++	{ 0x810d, 0x1f },
++	{ 0x810e, 0x00 },
++	{ 0x8168, 0x0b },
++	{ 0x8169, 0x0b },
++	{ 0x816a, 0x09 },
++	{ 0x816b, 0x0f },
++	{ 0x816c, 0x0f },
++	{ 0x816d, 0x0f },
++	{ 0x816e, 0x0b },
++	{ 0x816f, 0x0b },
++	{ 0x8170, 0x0a },
++	{ 0x8171, 0x0f },
++	{ 0x8172, 0x0f },
++	{ 0x8173, 0x0f },
++	{ 0x8174, 0x0d },
++	{ 0x8175, 0x0c },
++	{ 0x8176, 0x09 },
++	{ 0x8177, 0x0f },
++	{ 0x8178, 0x0f },
++	{ 0x8179, 0x0f },
++	{ 0x817a, 0x0c },
++	{ 0x817b, 0x0d },
++	{ 0x817c, 0x09 },
++	{ 0x817d, 0x0f },
++	{ 0x817e, 0x0f },
++	{ 0x817f, 0x0f },
++	{ 0x8180, 0x0d },
++	{ 0x8181, 0x0d },
++	{ 0x8182, 0x09 },
++	{ 0x8183, 0x0f },
++	{ 0x8184, 0x0f },
++	{ 0x8185, 0x0f },
++	{ 0x81b0, 0x03 },
++	{ 0x81e3, 0x04 },
++	{ 0x81e4, 0x04 },
++	{ 0x81e9, 0x04 },
++	{ 0x81ea, 0x04 },
++	{ 0x81ef, 0x04 },
++	{ 0x81f0, 0x04 },
++	{ 0x9186, 0x00 },
++	{ 0xd030, 0x01 },
++	{ 0xd04c, 0x10 },
++	{ 0xd123, 0x75 },
++	{ 0xd144, 0x10 },
++	{ 0xd1af, 0x08 },
++	{ 0xd1bd, 0x67 },
++	{ 0xd1d4, 0x04 },
++	{ 0xd1d5, 0x04 },
++	{ 0xd1d6, 0x07 },
++	{ 0xd1d7, 0x07 },
++	{ 0xd1d9, 0x40 },
++	{ 0xd1db, 0x58 },
++	{ 0xd1dd, 0xd4 },
++	{ 0xd1df, 0xd4 },
++	{ 0xd1e1, 0xd4 },
++	{ 0xd348, 0x0f },
++	{ 0xd357, 0x00 },
++	{ 0xd3ae, 0x11 },
++	{ 0xd3af, 0x44 },
++	{ 0xd3b1, 0x7d },
++	{ 0xd803, 0xf0 },
++	{ 0xd80b, 0xf0 },
++	{ 0xd813, 0xf1 },
++	{ 0xd81b, 0xf0 },
++	{ 0xd843, 0xf1 },
++	{ 0xd84f, 0xf0 },
++	{ 0xd934, 0x23 },
++	{ 0xd935, 0xc8 },
++	{ 0xd938, 0x27 },
++	{ 0xd939, 0x10 },
++	{ 0xd93a, 0x23 },
++	{ 0xd93b, 0xc8 },
++	{ 0xd955, 0x07 },
++	{ 0xd95a, 0x04 },
++	{ 0xd95b, 0x0a },
++	{ 0xd95c, 0x1e },
++	{ 0xd95d, 0x00 },
++	{ 0xd95e, 0x14 },
++	{ 0xd95f, 0x21 },
++	{ 0xd960, 0x00 },
++	{ 0xd961, 0x00 },
++	{ 0xd962, 0x0a },
++	{ 0xd963, 0x50 },
++	{ 0xd964, 0x0a },
++	{ 0xd965, 0xa0 },
++	{ 0xd966, 0x00 },
++	{ 0xd967, 0x28 },
++	{ 0xd968, 0x0a },
++	{ 0xd969, 0x50 },
++	{ 0xd96a, 0x0a },
++	{ 0xd96b, 0xa0 },
++	{ 0xd96c, 0x00 },
++	{ 0xd96d, 0x00 },
++	{ 0xd96e, 0x0a },
++	{ 0xd96f, 0x44 },
++	{ 0xd970, 0x0a },
++	{ 0xd971, 0x50 },
++	{ 0xd972, 0x00 },
++	{ 0xd973, 0x00 },
++	{ 0xd974, 0x0a },
++	{ 0xd975, 0x44 },
++	{ 0xd976, 0x0a },
++	{ 0xd977, 0x50 },
++	{ 0xda10, 0x00 },
++	{ 0xda11, 0x14 },
++	{ 0xda12, 0x64 },
++	{ 0xda13, 0x00 },
++	{ 0xda14, 0x14 },
++	{ 0xda15, 0xc8 },
++	{ 0xda22, 0x00 },
++	{ 0xda23, 0x56 },
++	{ 0xda24, 0x00 },
++	{ 0xda25, 0xb5 },
++	{ 0xda26, 0x00 },
++	{ 0xda27, 0xe8 },
++	{ 0xda28, 0x08 },
++	{ 0xda29, 0xa6 },
++	{ 0xda2a, 0x00 },
++	{ 0xda2b, 0xa2 },
++	{ 0xda2f, 0x01 },
++};
++
++#endif /* __CCS_IMX681_VENDOR_H__ */
+diff --git a/drivers/media/i2c/ccs/ccs-quirk.c b/drivers/media/i2c/ccs/ccs-quirk.c
+index e48a4fa1f..bc1ca1042 100644
+--- a/drivers/media/i2c/ccs/ccs-quirk.c
++++ b/drivers/media/i2c/ccs/ccs-quirk.c
+@@ -33,6 +33,74 @@ static int ccs_write_addr_8s(struct ccs_sensor *sensor,
+ 	return 0;
+ }
+ 
++struct ccs_limit_override {
++	unsigned int limit;
++	u32 value;
++};
++
++static int imx681_limits(struct ccs_sensor *sensor)
++{
++	/*
++	 * Embedded equivalent of the IMX681 firmware limits for either
++	 * reported manufacturer ID. Values are raw CCS register encodings,
++	 * including IEEE-754 frequency limits.
++	 */
++	static const struct ccs_limit_override overrides[] = {
++		/* The 0x3b60 variant reports IREAL, but our overrides are IEEE-754. */
++		{ CCS_L_CLOCK_CAPA_TYPE_CAPABILITY, 0 },
++		{ CCS_L_MIN_OP_SYS_CLK_FREQ_REV_MHZ, 0x44834000 },
++		{ CCS_L_MAX_OP_SYS_CLK_FREQ_REV_MHZ, 0x451c4000 },
++		{ CCS_L_MIN_OP_PIX_CLK_FREQ_REV_MHZ, 0x41960000 },
++		{ CCS_L_MAX_OP_PIX_CLK_FREQ_REV_MHZ, 0x4332947b },
++		{ CCS_L_NUM_OF_OP_LANES, 0x00 },
++		{ CCS_L_OP_BITS_PER_LANE, 0x0a },
++		{ CCS_L_MIN_PLL_OP_CLK_FREQ_MHZ, 0x4489e600 },
++		/* PLL front-branch limits — the 0x3b60 variant reports 0 for these. */
++		{ CCS_L_MIN_PLL_IP_CLK_FREQ_MHZ, 0x40000000 }, /* 2.0 MHz */
++		{ CCS_L_MAX_PLL_IP_CLK_FREQ_MHZ, 0x42000000 }, /* 32.0 MHz */
++		{ CCS_L_MAX_PLL_OP_CLK_FREQ_MHZ, 0x451c4000 }, /* ~2500 MHz */
++		{ CCS_L_MIN_OP_SYS_CLK_FREQ_MHZ, 0x44834000 }, /* ~1050 MHz */
++		{ CCS_L_MAX_OP_SYS_CLK_FREQ_MHZ, 0x451c4000 }, /* ~2500 MHz */
++		{ CCS_L_MIN_OP_PIX_CLK_FREQ_MHZ, 0x41960000 }, /* ~18.75 MHz */
++		{ CCS_L_MIN_PLL_MULTIPLIER, 1 },
++		{ CCS_L_MAX_PLL_MULTIPLIER, 511 },
++		{ CCS_L_MIN_OP_SYS_CLK_DIV, 1 },
++		{ CCS_L_MAX_OP_SYS_CLK_DIV, 16 },
++		{ CCS_L_MIN_OP_PIX_CLK_DIV, 1 },
++		{ CCS_L_MAX_OP_PIX_CLK_DIV, 16 },
++		/*
++		 * Bring-up-derived permissive limit. The mode table programs the
++		 * sensor PLL itself; its validated 3844x2640 mode emits a 969.6
++		 * Msymbol/s C-PHY stream and uses a 387.84 MHz pixel rate. Keep the
++		 * calculator ceiling at 600 MHz so this fixed mode passes probe even
++		 * when the sensor's reported limits are incomplete.
++		 */
++		{ CCS_L_MAX_OP_PIX_CLK_FREQ_MHZ, 0x44160000 }, /* 600 MHz */
++		{ CCS_L_MIN_VT_SYS_CLK_DIV, 1 },
++		{ CCS_L_MAX_VT_SYS_CLK_DIV, 16 },
++		{ CCS_L_MIN_VT_PIX_CLK_DIV, 1 },
++		{ CCS_L_MAX_VT_PIX_CLK_DIV, 16 },
++		{ CCS_L_MIN_VT_SYS_CLK_FREQ_MHZ, 0x44834000 }, /* ~1050 MHz */
++		{ CCS_L_MAX_VT_SYS_CLK_FREQ_MHZ, 0x451c4000 }, /* ~2500 MHz */
++		{ CCS_L_MIN_VT_PIX_CLK_FREQ_MHZ, 0x43200000 }, /* 160 MHz */
++		{ CCS_L_MAX_VT_PIX_CLK_FREQ_MHZ, 0x44160000 }, /* 600 MHz */
++	};
++	unsigned int i;
++
++	if (!ccs_is_imx681(sensor))
++		return 0;
++
++	for (i = 0; i < ARRAY_SIZE(overrides); i++)
++		ccs_replace_limit(sensor, overrides[i].limit, 0,
++				  overrides[i].value);
++
++	return 0;
++}
++
++const struct ccs_quirk ccs_imx681_quirk = {
++	.limits = imx681_limits,
++};
++
+ static int jt8ew9_limits(struct ccs_sensor *sensor)
+ {
+ 	if (sensor->minfo.revision_number < 0x0300)
+diff --git a/drivers/media/i2c/ccs/ccs-quirk.h b/drivers/media/i2c/ccs/ccs-quirk.h
+index 392c97109..156b32605 100644
+--- a/drivers/media/i2c/ccs/ccs-quirk.h
++++ b/drivers/media/i2c/ccs/ccs-quirk.h
+@@ -75,5 +75,6 @@ extern const struct ccs_quirk smiapp_jt8ev1_quirk;
+ extern const struct ccs_quirk smiapp_imx125es_quirk;
+ extern const struct ccs_quirk smiapp_jt8ew9_quirk;
+ extern const struct ccs_quirk smiapp_tcm8500md_quirk;
++extern const struct ccs_quirk ccs_imx681_quirk;
+ 
+ #endif /* __CCS_QUIRK__ */
+diff --git a/drivers/media/i2c/ccs/ccs-reg-access.c b/drivers/media/i2c/ccs/ccs-reg-access.c
+index a0181a5d2..9e60ef109 100644
+--- a/drivers/media/i2c/ccs/ccs-reg-access.c
++++ b/drivers/media/i2c/ccs/ccs-reg-access.c
+@@ -48,6 +48,9 @@ static u32 float_to_u32_mul_1000000(struct i2c_client *client, u32 phloat)
+ 	 * have 0 in the high bit)
+ 	 */
+ 	exp = ((int32_t)phloat >> 23) - 127;
++	/* Such small values round down to zero after scaling. */
++	if (exp <= -64)
++		return 0;
+ 
+ 	/* Extract mantissa, add missing '1' bit and it's in MHz */
+ 	man = ((phloat & 0x7fffff) | 0x800000) * 1000000ULL;
+diff --git a/drivers/media/i2c/ccs/ccs.h b/drivers/media/i2c/ccs/ccs.h
+index 58952c5bf..1b21f310b 100644
+--- a/drivers/media/i2c/ccs/ccs.h
++++ b/drivers/media/i2c/ccs/ccs.h
+@@ -249,6 +249,8 @@ struct ccs_sensor {
+ 
+ 	/* Pixel array controls */
+ 	struct v4l2_ctrl *exposure;
++	struct v4l2_ctrl *analogue_gain;
++	struct v4l2_ctrl *digital_gain;
+ 	struct v4l2_ctrl *hflip;
+ 	struct v4l2_ctrl *vflip;
+ 	struct v4l2_ctrl *vblank;
+@@ -268,6 +270,32 @@ struct ccs_sensor {
+ #define to_ccs_sensor(_sd)	\
+ 	(to_ccs_subdev(_sd)->sensor)
+ 
++#define CCS_IMX681_MFR_ID		0x4260
++#define CCS_IMX681_SP11_MFR_ID		0x3b60
++#define CCS_IMX681_MODEL_ID		0x0681
++#define CCS_IMX681_REVISION		0x0010
++
++static inline bool ccs_is_imx681_id(u16 manufacturer_id, u16 model_id,
++				    u16 revision)
++{
++	/*
++	 * This SP11 unit reports manufacturer 0x3b60 (firmware filename
++	 * ccs-sensor-3b60-0681-0010.fw); other units may report 0x4260.
++	 * Both identities are the Sony IMX681.
++	 */
++	return (manufacturer_id == CCS_IMX681_MFR_ID ||
++		manufacturer_id == CCS_IMX681_SP11_MFR_ID) &&
++	       model_id == CCS_IMX681_MODEL_ID &&
++	       revision == CCS_IMX681_REVISION;
++}
++
++static inline bool ccs_is_imx681(const struct ccs_sensor *sensor)
++{
++	return ccs_is_imx681_id(sensor->minfo.sensor_mipi_manufacturer_id,
++				sensor->minfo.sensor_model_id,
++				sensor->minfo.sensor_revision_number);
++}
++
+ void ccs_replace_limit(struct ccs_sensor *sensor,
+ 		       unsigned int limit, unsigned int offset, u32 val);
+ u32 ccs_get_limit(struct ccs_sensor *sensor, unsigned int limit,
+diff --git a/drivers/media/i2c/imx681-tables.h b/drivers/media/i2c/imx681-tables.h
+new file mode 100644
+index 000000000..b6ec68594
+--- /dev/null
++++ b/drivers/media/i2c/imx681-tables.h
+@@ -0,0 +1,455 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Sony IMX681 register tables for the Surface Pro 11 front camera.
++ *
++ * These tables are an independently written representation of runtime I2C
++ * transactions observed on the author's own hardware.  The observed
++ * stream-start order is global initialization, followed by the selected mode.
++ * Mode: 3840x2640 RAW10, LLP 6752, FLL 3554, C-PHY bus pixel rate
++ * 548571428 Hz, ONE C-PHY TRIO at 2406 Msym/s. Runtime frame cadence is
++ * approximately 30 fps; the distinct VT timing clock remains to be measured.
++ */
++#ifndef __IMX681_TABLES_H
++#define __IMX681_TABLES_H
++
++#include <media/v4l2-cci.h>
++
++static const struct cci_reg_sequence imx681_global_init_table[] = {
++	{ CCI_REG8(0x0136), 0x13 },
++	{ CCI_REG8(0x0137), 0x33 },
++	{ CCI_REG8(0x002c), 0x05 },
++	{ CCI_REG8(0x002d), 0x05 },
++	{ CCI_REG8(0x0111), 0x03 },
++	{ CCI_REG8(0x30eb), 0x05 },
++	{ CCI_REG8(0x30eb), 0x0c },
++	{ CCI_REG8(0x300a), 0xff },
++	{ CCI_REG8(0x300b), 0xff },
++	{ CCI_REG8(0x3532), 0xff },
++	{ CCI_REG8(0x3533), 0xff },
++	{ CCI_REG8(0x051e), 0x00 },
++	{ CCI_REG8(0x0905), 0x04 },
++	{ CCI_REG8(0x2029), 0x01 },
++	{ CCI_REG8(0x202a), 0x11 },
++	{ CCI_REG8(0x20a1), 0x00 },
++	{ CCI_REG8(0x20a2), 0x02 },
++	{ CCI_REG8(0x20a3), 0x03 },
++	{ CCI_REG8(0x20ac), 0x01 },
++	{ CCI_REG8(0x20ad), 0x01 },
++	{ CCI_REG8(0x20ae), 0x01 },
++	{ CCI_REG8(0x20af), 0x01 },
++	{ CCI_REG8(0x20b0), 0x00 },
++	{ CCI_REG8(0x20b1), 0x01 },
++	{ CCI_REG8(0x20b2), 0x02 },
++	{ CCI_REG8(0x20b3), 0x03 },
++	{ CCI_REG8(0x706f), 0x00 },
++	{ CCI_REG8(0x7130), 0x08 },
++	{ CCI_REG8(0x7131), 0x08 },
++	{ CCI_REG8(0x7408), 0x89 },
++	{ CCI_REG8(0x7437), 0x3d },
++	{ CCI_REG8(0x7439), 0x29 },
++	{ CCI_REG8(0x7443), 0x38 },
++	{ CCI_REG8(0x7447), 0x55 },
++	{ CCI_REG8(0x744b), 0x00 },
++	{ CCI_REG8(0x7451), 0x8e },
++	{ CCI_REG8(0x746d), 0x29 },
++	{ CCI_REG8(0x747d), 0x68 },
++	{ CCI_REG8(0x7481), 0x60 },
++	{ CCI_REG8(0x7491), 0x2d },
++	{ CCI_REG8(0x7493), 0x31 },
++	{ CCI_REG8(0x74a5), 0x52 },
++	{ CCI_REG8(0x74af), 0x4a },
++	{ CCI_REG8(0x74b5), 0x1f },
++	{ CCI_REG8(0x74b7), 0x31 },
++	{ CCI_REG8(0x74bd), 0x75 },
++	{ CCI_REG8(0x74c5), 0x06 },
++	{ CCI_REG8(0x74c9), 0x52 },
++	{ CCI_REG8(0x74d3), 0x4a },
++	{ CCI_REG8(0x74d9), 0x1f },
++	{ CCI_REG8(0x74db), 0x31 },
++	{ CCI_REG8(0x74e1), 0x75 },
++	{ CCI_REG8(0x74e9), 0x06 },
++	{ CCI_REG8(0x74ed), 0x52 },
++	{ CCI_REG8(0x74f7), 0x4a },
++	{ CCI_REG8(0x74fd), 0x1f },
++	{ CCI_REG8(0x74ff), 0x31 },
++	{ CCI_REG8(0x7505), 0x75 },
++	{ CCI_REG8(0x750d), 0x06 },
++	{ CCI_REG8(0x7537), 0x38 },
++	{ CCI_REG8(0x753d), 0x4a },
++	{ CCI_REG8(0x753f), 0x4a },
++	{ CCI_REG8(0x7541), 0x4a },
++	{ CCI_REG8(0x7549), 0x8e },
++	{ CCI_REG8(0x754f), 0x75 },
++	{ CCI_REG8(0x7551), 0x75 },
++	{ CCI_REG8(0x7553), 0x75 },
++	{ CCI_REG8(0x792b), 0x39 },
++	{ CCI_REG8(0x792d), 0x43 },
++	{ CCI_REG8(0x79d3), 0x25 },
++	{ CCI_REG8(0x79d6), 0x8e },
++	{ CCI_REG8(0x79d7), 0x01 },
++	{ CCI_REG8(0x79d8), 0xe7 },
++	{ CCI_REG8(0x79d9), 0x25 },
++	{ CCI_REG8(0x79db), 0x76 },
++	{ CCI_REG8(0x79dc), 0x8e },
++	{ CCI_REG8(0x79dd), 0x01 },
++	{ CCI_REG8(0x79de), 0xe7 },
++	{ CCI_REG8(0x79df), 0x25 },
++	{ CCI_REG8(0x79e1), 0x76 },
++	{ CCI_REG8(0x79e2), 0x8e },
++	{ CCI_REG8(0x79e3), 0x01 },
++	{ CCI_REG8(0x79e4), 0xe7 },
++	{ CCI_REG8(0x79e5), 0x25 },
++	{ CCI_REG8(0x79e7), 0x76 },
++	{ CCI_REG8(0x79e8), 0x8e },
++	{ CCI_REG8(0x7a01), 0xff },
++	{ CCI_REG8(0x7a29), 0x6c },
++	{ CCI_REG8(0x7a2b), 0xda },
++	{ CCI_REG8(0x7a34), 0x6c },
++	{ CCI_REG8(0x7a37), 0xda },
++	{ CCI_REG8(0x7a40), 0x6c },
++	{ CCI_REG8(0x7a43), 0xda },
++	{ CCI_REG8(0x7b08), 0x00 },
++	{ CCI_REG8(0x7b09), 0x01 },
++	{ CCI_REG8(0x7c03), 0x38 },
++	{ CCI_REG8(0x7c09), 0x4a },
++	{ CCI_REG8(0x7c0b), 0x4a },
++	{ CCI_REG8(0x7c0d), 0x4a },
++	{ CCI_REG8(0x7c13), 0x8e },
++	{ CCI_REG8(0x7c19), 0x75 },
++	{ CCI_REG8(0x7c1b), 0x75 },
++	{ CCI_REG8(0x7c1d), 0x75 },
++	{ CCI_REG8(0x7c90), 0x00 },
++	{ CCI_REG8(0x7c91), 0x00 },
++	{ CCI_REG8(0x7c92), 0x00 },
++	{ CCI_REG8(0x7c9d), 0x01 },
++	{ CCI_REG8(0x7c9e), 0x01 },
++	{ CCI_REG8(0x7c9f), 0x01 },
++	{ CCI_REG8(0x7e9b), 0x07 },
++	{ CCI_REG8(0x7f09), 0x00 },
++	{ CCI_REG8(0x7f36), 0x00 },
++	{ CCI_REG8(0x7f4f), 0x0a },
++	{ CCI_REG8(0x7f50), 0x0a },
++	{ CCI_REG8(0x7f51), 0x0a },
++	{ CCI_REG8(0x7f55), 0x05 },
++	{ CCI_REG8(0x7f56), 0x05 },
++	{ CCI_REG8(0x7f57), 0x05 },
++	{ CCI_REG8(0x7f5b), 0x03 },
++	{ CCI_REG8(0x7f5c), 0x03 },
++	{ CCI_REG8(0x7f5d), 0x03 },
++	{ CCI_REG8(0x7f61), 0x03 },
++	{ CCI_REG8(0x7f62), 0x03 },
++	{ CCI_REG8(0x7f63), 0x03 },
++	{ CCI_REG8(0x7f67), 0x03 },
++	{ CCI_REG8(0x7f68), 0x03 },
++	{ CCI_REG8(0x7f69), 0x03 },
++	{ CCI_REG8(0x7f6a), 0x05 },
++	{ CCI_REG8(0x7f6b), 0x05 },
++	{ CCI_REG8(0x7f6c), 0x05 },
++	{ CCI_REG8(0x7f6d), 0x11 },
++	{ CCI_REG8(0x7f6e), 0x14 },
++	{ CCI_REG8(0x7f6f), 0x14 },
++	{ CCI_REG8(0x7f73), 0x14 },
++	{ CCI_REG8(0x7f74), 0x1c },
++	{ CCI_REG8(0x7f75), 0x14 },
++	{ CCI_REG8(0x7f76), 0x08 },
++	{ CCI_REG8(0x7f79), 0x14 },
++	{ CCI_REG8(0x7f7a), 0x1c },
++	{ CCI_REG8(0x7f7b), 0x14 },
++	{ CCI_REG8(0x7f7f), 0x1c },
++	{ CCI_REG8(0x7f80), 0x1c },
++	{ CCI_REG8(0x7f81), 0x1c },
++	{ CCI_REG8(0x7f85), 0x1c },
++	{ CCI_REG8(0x7f86), 0x1c },
++	{ CCI_REG8(0x7f87), 0x1c },
++	{ CCI_REG8(0x7f9d), 0x09 },
++	{ CCI_REG8(0x7f9e), 0x09 },
++	{ CCI_REG8(0x7f9f), 0x09 },
++	{ CCI_REG8(0x7fa3), 0x09 },
++	{ CCI_REG8(0x7fa4), 0x09 },
++	{ CCI_REG8(0x7fa5), 0x09 },
++	{ CCI_REG8(0x7fac), 0x00 },
++	{ CCI_REG8(0x7fad), 0x00 },
++	{ CCI_REG8(0x7fae), 0x00 },
++	{ CCI_REG8(0x7faf), 0x00 },
++	{ CCI_REG8(0x7fb0), 0x00 },
++	{ CCI_REG8(0x7fb1), 0x00 },
++	{ CCI_REG8(0x7fb2), 0x00 },
++	{ CCI_REG8(0x7fb3), 0x00 },
++	{ CCI_REG8(0x7fb4), 0x00 },
++	{ CCI_REG8(0x7fb5), 0x00 },
++	{ CCI_REG8(0x7fb6), 0x00 },
++	{ CCI_REG8(0x7fb7), 0x00 },
++	{ CCI_REG8(0x7fb8), 0x00 },
++	{ CCI_REG8(0x7fb9), 0x00 },
++	{ CCI_REG8(0x7fba), 0x00 },
++	{ CCI_REG8(0x7fbb), 0x00 },
++	{ CCI_REG8(0x7fbc), 0x00 },
++	{ CCI_REG8(0x7fbd), 0x00 },
++	{ CCI_REG8(0x7fbe), 0x00 },
++	{ CCI_REG8(0x7fbf), 0x00 },
++	{ CCI_REG8(0x7fc0), 0x00 },
++	{ CCI_REG8(0x7fc1), 0x00 },
++	{ CCI_REG8(0x7fc2), 0x00 },
++	{ CCI_REG8(0x7fc3), 0x00 },
++	{ CCI_REG8(0x7fcb), 0x37 },
++	{ CCI_REG8(0x7fcd), 0x37 },
++	{ CCI_REG8(0x7fcf), 0x37 },
++	{ CCI_REG8(0x7fd7), 0x44 },
++	{ CCI_REG8(0x7fd9), 0x44 },
++	{ CCI_REG8(0x7fdb), 0x44 },
++	{ CCI_REG8(0x7fdd), 0x38 },
++	{ CCI_REG8(0x7fe3), 0x4a },
++	{ CCI_REG8(0x7fe5), 0x4a },
++	{ CCI_REG8(0x7fe7), 0x4a },
++	{ CCI_REG8(0x7fef), 0x4a },
++	{ CCI_REG8(0x7ff1), 0x4a },
++	{ CCI_REG8(0x7ff3), 0x4a },
++	{ CCI_REG8(0x7ffb), 0x4a },
++	{ CCI_REG8(0x7ffd), 0x4a },
++	{ CCI_REG8(0x7fff), 0x4a },
++	{ CCI_REG8(0x8007), 0x62 },
++	{ CCI_REG8(0x8009), 0x62 },
++	{ CCI_REG8(0x800b), 0x62 },
++	{ CCI_REG8(0x8013), 0x6f },
++	{ CCI_REG8(0x8015), 0x6f },
++	{ CCI_REG8(0x8017), 0x6f },
++	{ CCI_REG8(0x8019), 0x8e },
++	{ CCI_REG8(0x801f), 0x75 },
++	{ CCI_REG8(0x8021), 0x75 },
++	{ CCI_REG8(0x8023), 0x75 },
++	{ CCI_REG8(0x802b), 0x75 },
++	{ CCI_REG8(0x802d), 0x75 },
++	{ CCI_REG8(0x802f), 0x75 },
++	{ CCI_REG8(0x8037), 0x75 },
++	{ CCI_REG8(0x8039), 0x75 },
++	{ CCI_REG8(0x803b), 0x75 },
++	{ CCI_REG8(0x803c), 0x13 },
++	{ CCI_REG8(0x803d), 0x17 },
++	{ CCI_REG8(0x803e), 0x15 },
++	{ CCI_REG8(0x803f), 0x11 },
++	{ CCI_REG8(0x8040), 0x0a },
++	{ CCI_REG8(0x8041), 0x08 },
++	{ CCI_REG8(0x8047), 0x17 },
++	{ CCI_REG8(0x80f0), 0x24 },
++	{ CCI_REG8(0x80f1), 0x1b },
++	{ CCI_REG8(0x80f2), 0x1a },
++	{ CCI_REG8(0x80f3), 0x14 },
++	{ CCI_REG8(0x80f4), 0x14 },
++	{ CCI_REG8(0x80f5), 0x12 },
++	{ CCI_REG8(0x80f6), 0x25 },
++	{ CCI_REG8(0x80f7), 0x1c },
++	{ CCI_REG8(0x80f8), 0x1b },
++	{ CCI_REG8(0x80f9), 0x18 },
++	{ CCI_REG8(0x80fa), 0x17 },
++	{ CCI_REG8(0x80fb), 0x18 },
++	{ CCI_REG8(0x80fc), 0x26 },
++	{ CCI_REG8(0x80fd), 0x1e },
++	{ CCI_REG8(0x80fe), 0x1d },
++	{ CCI_REG8(0x80ff), 0x1c },
++	{ CCI_REG8(0x8100), 0x1b },
++	{ CCI_REG8(0x8101), 0x1c },
++	{ CCI_REG8(0x8102), 0x27 },
++	{ CCI_REG8(0x8103), 0x1e },
++	{ CCI_REG8(0x8104), 0x1d },
++	{ CCI_REG8(0x8105), 0x1e },
++	{ CCI_REG8(0x8106), 0x1e },
++	{ CCI_REG8(0x8107), 0x1e },
++	{ CCI_REG8(0x8108), 0x27 },
++	{ CCI_REG8(0x8109), 0x1e },
++	{ CCI_REG8(0x810a), 0x1e },
++	{ CCI_REG8(0x810b), 0x1e },
++	{ CCI_REG8(0x810c), 0x1e },
++	{ CCI_REG8(0x810d), 0x1f },
++	{ CCI_REG8(0x810e), 0x00 },
++	{ CCI_REG8(0x8168), 0x0b },
++	{ CCI_REG8(0x8169), 0x0b },
++	{ CCI_REG8(0x816a), 0x09 },
++	{ CCI_REG8(0x816b), 0x0f },
++	{ CCI_REG8(0x816c), 0x0f },
++	{ CCI_REG8(0x816d), 0x0f },
++	{ CCI_REG8(0x816e), 0x0b },
++	{ CCI_REG8(0x816f), 0x0b },
++	{ CCI_REG8(0x8170), 0x0a },
++	{ CCI_REG8(0x8171), 0x0f },
++	{ CCI_REG8(0x8172), 0x0f },
++	{ CCI_REG8(0x8173), 0x0f },
++	{ CCI_REG8(0x8174), 0x0d },
++	{ CCI_REG8(0x8175), 0x0c },
++	{ CCI_REG8(0x8176), 0x09 },
++	{ CCI_REG8(0x8177), 0x0f },
++	{ CCI_REG8(0x8178), 0x0f },
++	{ CCI_REG8(0x8179), 0x0f },
++	{ CCI_REG8(0x817a), 0x0c },
++	{ CCI_REG8(0x817b), 0x0d },
++	{ CCI_REG8(0x817c), 0x09 },
++	{ CCI_REG8(0x817d), 0x0f },
++	{ CCI_REG8(0x817e), 0x0f },
++	{ CCI_REG8(0x817f), 0x0f },
++	{ CCI_REG8(0x8180), 0x0d },
++	{ CCI_REG8(0x8181), 0x0d },
++	{ CCI_REG8(0x8182), 0x09 },
++	{ CCI_REG8(0x8183), 0x0f },
++	{ CCI_REG8(0x8184), 0x0f },
++	{ CCI_REG8(0x8185), 0x0f },
++	{ CCI_REG8(0x81b0), 0x03 },
++	{ CCI_REG8(0x81e3), 0x04 },
++	{ CCI_REG8(0x81e4), 0x04 },
++	{ CCI_REG8(0x81e9), 0x04 },
++	{ CCI_REG8(0x81ea), 0x04 },
++	{ CCI_REG8(0x81ef), 0x04 },
++	{ CCI_REG8(0x81f0), 0x04 },
++	{ CCI_REG8(0x9186), 0x00 },
++	{ CCI_REG8(0xd030), 0x01 },
++	{ CCI_REG8(0xd04c), 0x10 },
++	{ CCI_REG8(0xd123), 0x75 },
++	{ CCI_REG8(0xd144), 0x10 },
++	{ CCI_REG8(0xd1af), 0x08 },
++	{ CCI_REG8(0xd1bd), 0x67 },
++	{ CCI_REG8(0xd1d4), 0x04 },
++	{ CCI_REG8(0xd1d5), 0x04 },
++	{ CCI_REG8(0xd1d6), 0x07 },
++	{ CCI_REG8(0xd1d7), 0x07 },
++	{ CCI_REG8(0xd1d9), 0x40 },
++	{ CCI_REG8(0xd1db), 0x58 },
++	{ CCI_REG8(0xd1dd), 0xd4 },
++	{ CCI_REG8(0xd1df), 0xd4 },
++	{ CCI_REG8(0xd1e1), 0xd4 },
++	{ CCI_REG8(0xd348), 0x0f },
++	{ CCI_REG8(0xd357), 0x00 },
++	{ CCI_REG8(0xd3ae), 0x11 },
++	{ CCI_REG8(0xd3af), 0x44 },
++	{ CCI_REG8(0xd3b1), 0x7d },
++	{ CCI_REG8(0xd803), 0xf0 },
++	{ CCI_REG8(0xd80b), 0xf0 },
++	{ CCI_REG8(0xd813), 0xf1 },
++	{ CCI_REG8(0xd81b), 0xf0 },
++	{ CCI_REG8(0xd843), 0xf1 },
++	{ CCI_REG8(0xd84f), 0xf0 },
++	{ CCI_REG8(0xd934), 0x23 },
++	{ CCI_REG8(0xd935), 0xc8 },
++	{ CCI_REG8(0xd938), 0x27 },
++	{ CCI_REG8(0xd939), 0x10 },
++	{ CCI_REG8(0xd93a), 0x23 },
++	{ CCI_REG8(0xd93b), 0xc8 },
++	{ CCI_REG8(0xd955), 0x07 },
++	{ CCI_REG8(0xd95a), 0x04 },
++	{ CCI_REG8(0xd95b), 0x0a },
++	{ CCI_REG8(0xd95c), 0x1e },
++	{ CCI_REG8(0xd95d), 0x00 },
++	{ CCI_REG8(0xd95e), 0x14 },
++	{ CCI_REG8(0xd95f), 0x21 },
++	{ CCI_REG8(0xd960), 0x00 },
++	{ CCI_REG8(0xd961), 0x00 },
++	{ CCI_REG8(0xd962), 0x0a },
++	{ CCI_REG8(0xd963), 0x50 },
++	{ CCI_REG8(0xd964), 0x0a },
++	{ CCI_REG8(0xd965), 0xa0 },
++	{ CCI_REG8(0xd966), 0x00 },
++	{ CCI_REG8(0xd967), 0x28 },
++	{ CCI_REG8(0xd968), 0x0a },
++	{ CCI_REG8(0xd969), 0x50 },
++	{ CCI_REG8(0xd96a), 0x0a },
++	{ CCI_REG8(0xd96b), 0xa0 },
++	{ CCI_REG8(0xd96c), 0x00 },
++	{ CCI_REG8(0xd96d), 0x00 },
++	{ CCI_REG8(0xd96e), 0x0a },
++	{ CCI_REG8(0xd96f), 0x44 },
++	{ CCI_REG8(0xd970), 0x0a },
++	{ CCI_REG8(0xd971), 0x50 },
++	{ CCI_REG8(0xd972), 0x00 },
++	{ CCI_REG8(0xd973), 0x00 },
++	{ CCI_REG8(0xd974), 0x0a },
++	{ CCI_REG8(0xd975), 0x44 },
++	{ CCI_REG8(0xd976), 0x0a },
++	{ CCI_REG8(0xd977), 0x50 },
++	{ CCI_REG8(0xda10), 0x00 },
++	{ CCI_REG8(0xda11), 0x14 },
++	{ CCI_REG8(0xda12), 0x64 },
++	{ CCI_REG8(0xda13), 0x00 },
++	{ CCI_REG8(0xda14), 0x14 },
++	{ CCI_REG8(0xda15), 0xc8 },
++	{ CCI_REG8(0xda22), 0x00 },
++	{ CCI_REG8(0xda23), 0x56 },
++	{ CCI_REG8(0xda24), 0x00 },
++	{ CCI_REG8(0xda25), 0xb5 },
++	{ CCI_REG8(0xda26), 0x00 },
++	{ CCI_REG8(0xda27), 0xe8 },
++	{ CCI_REG8(0xda28), 0x08 },
++	{ CCI_REG8(0xda29), 0xa6 },
++	{ CCI_REG8(0xda2a), 0x00 },
++	{ CCI_REG8(0xda2b), 0xa2 },
++	{ CCI_REG8(0xda2f), 0x01 },
++};
++
++static const struct cci_reg_sequence imx681_mode_3840x2640[] = {
++	{ CCI_REG8(0x0110), 0x00 },
++	{ CCI_REG8(0x0112), 0x0a },
++	{ CCI_REG8(0x0113), 0x0a },
++	{ CCI_REG8(0x0114), 0x00 },
++	{ CCI_REG8(0x0342), 0x1a },
++	{ CCI_REG8(0x0343), 0x60 },
++	{ CCI_REG8(0x033d), 0x00 },
++	{ CCI_REG8(0x033e), 0x0d },
++	{ CCI_REG8(0x033f), 0xe2 },
++	{ CCI_REG8(0x0344), 0x00 },
++	{ CCI_REG8(0x0345), 0x68 },
++	{ CCI_REG8(0x0346), 0x01 },
++	{ CCI_REG8(0x0347), 0x00 },
++	{ CCI_REG8(0x0348), 0x0f },
++	{ CCI_REG8(0x0349), 0x67 },
++	{ CCI_REG8(0x034a), 0x0b },
++	{ CCI_REG8(0x034b), 0x4f },
++	{ CCI_REG8(0x017c), 0x01 },
++	{ CCI_REG8(0x017d), 0x01 },
++	{ CCI_REG8(0x017e), 0x00 },
++	{ CCI_REG8(0x017f), 0x01 },
++	{ CCI_REG8(0x0180), 0x00 },
++	{ CCI_REG8(0x038c), 0x13 },
++	{ CCI_REG8(0x038d), 0x33 },
++	{ CCI_REG8(0x2000), 0x01 },
++	{ CCI_REG8(0x0408), 0x00 },
++	{ CCI_REG8(0x0409), 0x00 },
++	{ CCI_REG8(0x040a), 0x00 },
++	{ CCI_REG8(0x040b), 0x00 },
++	{ CCI_REG8(0x040c), 0x0f },
++	{ CCI_REG8(0x040d), 0x00 },
++	{ CCI_REG8(0x040e), 0x0a },
++	{ CCI_REG8(0x040f), 0x50 },
++	{ CCI_REG8(0x034c), 0x0f },
++	{ CCI_REG8(0x034d), 0x00 },
++	{ CCI_REG8(0x034e), 0x0a },
++	{ CCI_REG8(0x034f), 0x50 },
++	{ CCI_REG8(0x0301), 0x06 },
++	{ CCI_REG8(0x0303), 0x02 },
++	{ CCI_REG8(0x0305), 0x02 },
++	{ CCI_REG8(0x0306), 0x00 },
++	{ CCI_REG8(0x0307), 0xe1 },
++	{ CCI_REG8(0x030d), 0x03 },
++	{ CCI_REG8(0x030e), 0x01 },
++	{ CCI_REG8(0x030f), 0x77 },
++	{ CCI_REG8(0x0323), 0x00 },
++	{ CCI_REG8(0x0229), 0x00 },
++	{ CCI_REG8(0x022a), 0x0d },
++	{ CCI_REG8(0x022b), 0xda },
++	{ CCI_REG8(0xd383), 0x01 },
++	{ CCI_REG8(0x0204), 0x00 },
++	{ CCI_REG8(0x0205), 0x00 },
++	{ CCI_REG8(0x020e), 0x01 },
++	{ CCI_REG8(0x020f), 0x00 },
++	{ CCI_REG8(0x0210), 0x01 },
++	{ CCI_REG8(0x0211), 0x00 },
++	{ CCI_REG8(0x0212), 0x01 },
++	{ CCI_REG8(0x0213), 0x00 },
++	{ CCI_REG8(0x0214), 0x01 },
++	{ CCI_REG8(0x0215), 0x00 },
++	{ CCI_REG8(0x6a83), 0x03 },
++	{ CCI_REG8(0x7e9b), 0x02 },
++	{ CCI_REG8(0xd1ce), 0x00 },
++	{ CCI_REG8(0xdc3c), 0x01 },
++	{ CCI_REG8(0x0368), 0x00 },
++	{ CCI_REG8(0x036a), 0x08 },
++	{ CCI_REG8(0x036b), 0x70 },
++	{ CCI_REG8(0x2001), 0x00 },
++};
++
++#endif /* __IMX681_TABLES_H */
+diff --git a/drivers/media/i2c/imx681.c b/drivers/media/i2c/imx681.c
+new file mode 100644
+index 000000000..b96337395
+--- /dev/null
++++ b/drivers/media/i2c/imx681.c
+@@ -0,0 +1,554 @@
++// SPDX-License-Identifier: GPL-2.0-only
++/*
++ * Sony IMX681 sensor driver (Surface Pro 11 front camera).
++ *
++ * The SP11 mode is an independently written representation of register
++ * transactions observed while operating the author's own camera hardware.
++ * Single supported mode:
++ * 3840x2640 RAW10 at ~30 fps over ONE C-PHY TRIO at 2406 Msym/s
++ * (CSI_SIGNALING_MODE 0x0111=3). This tree carries experimental
++ * three-phase qcom camss support.
++ */
++#include <linux/clk.h>
++#include <linux/delay.h>
++#include <linux/gpio/consumer.h>
++#include <linux/i2c.h>
++#include <linux/module.h>
++#include <linux/pm_runtime.h>
++#include <linux/regulator/consumer.h>
++#include <media/v4l2-cci.h>
++#include <media/v4l2-ctrls.h>
++#include <media/v4l2-device.h>
++#include <media/v4l2-fwnode.h>
++#include <media/v4l2-subdev.h>
++
++#include "imx681-tables.h"
++
++#define IMX681_REG_MODEL_ID	CCI_REG16(0x0016)
++#define IMX681_MODEL_ID		0x0681
++#define IMX681_REG_MODE_SELECT	CCI_REG8(0x0100)
++#define IMX681_MODE_STREAMING	1
++#define IMX681_MODE_STANDBY	0
++#define IMX681_REG_GROUP_HOLD	CCI_REG8(0x0104)
++#define IMX681_REG_EXPOSURE	CCI_REG24(0x0229)
++#define IMX681_REG_ANALOG_GAIN	CCI_REG16(0x0204)
++#define IMX681_REG_DIGITAL_GAIN	CCI_REG16(0x020e)
++#define IMX681_REG_FRAME_LENGTH	CCI_REG16(0x0340)
++
++#define IMX681_WIDTH		3840
++#define IMX681_HEIGHT		2640
++#define IMX681_LINE_LENGTH	6752
++#define IMX681_FRAME_LENGTH_DEF	2708
++#define IMX681_FRAME_LENGTH_MAX	0xffff
++#define IMX681_EXPOSURE_MARGIN	48
++#define IMX681_EXPOSURE_DEF	1600
++#define IMX681_AGAIN_MAX	960	/* gain = 1024 / (1024 - code) */
++#define IMX681_DGAIN_DEF	0x0100
++#define IMX681_PIXEL_RATE	548571428
++/* V4L2 C-PHY link frequency is half the 2406-Msym/s symbol rate. */
++#define IMX681_LINK_FREQ	1203000000
++#define IMX681_MBUS_CODE	MEDIA_BUS_FMT_SRGGB10_1X10
++
++#define IMX681_XCLR_MIN_DELAY_US	6200
++#define IMX681_XCLR_DELAY_RANGE_US	1000
++
++static const char * const imx681_supply_name[] = {
++	"dovdd",	/* IO 1.8 V (PM8010 LDO3_M) */
++	"avdd",		/* analog 2.8 V (PM8550 LDO7_B) */
++};
++
++static const s64 imx681_link_freq_menu[] = {
++	IMX681_LINK_FREQ,
++};
++
++struct imx681 {
++	struct device *dev;
++	struct regmap *regmap;
++	struct clk *xclk;
++	struct gpio_desc *reset_gpio;
++	struct regulator_bulk_data supplies[ARRAY_SIZE(imx681_supply_name)];
++
++	struct v4l2_subdev sd;
++	struct media_pad pad;
++	struct v4l2_ctrl_handler ctrl_handler;
++	struct v4l2_ctrl *vblank_ctrl;
++	struct v4l2_ctrl *expo_ctrl;
++	struct v4l2_ctrl *again_ctrl;
++	struct v4l2_ctrl *dgain_ctrl;
++};
++
++static inline struct imx681 *to_imx681(struct v4l2_subdev *sd)
++{
++	return container_of(sd, struct imx681, sd);
++}
++
++static int imx681_power_on(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct imx681 *sensor = to_imx681(sd);
++	int ret;
++
++	ret = regulator_bulk_enable(ARRAY_SIZE(imx681_supply_name),
++				    sensor->supplies);
++	if (ret) {
++		dev_err(dev, "failed to enable regulators: %d\n", ret);
++		return ret;
++	}
++
++	ret = clk_prepare_enable(sensor->xclk);
++	if (ret) {
++		dev_err(dev, "failed to enable xclk: %d\n", ret);
++		goto disable_reg;
++	}
++
++	gpiod_set_value_cansleep(sensor->reset_gpio, 0);
++	usleep_range(IMX681_XCLR_MIN_DELAY_US,
++		     IMX681_XCLR_MIN_DELAY_US + IMX681_XCLR_DELAY_RANGE_US);
++	return 0;
++
++disable_reg:
++	regulator_bulk_disable(ARRAY_SIZE(imx681_supply_name),
++			       sensor->supplies);
++	return ret;
++}
++
++static int imx681_power_off(struct device *dev)
++{
++	struct v4l2_subdev *sd = dev_get_drvdata(dev);
++	struct imx681 *sensor = to_imx681(sd);
++
++	gpiod_set_value_cansleep(sensor->reset_gpio, 1);
++	clk_disable_unprepare(sensor->xclk);
++	regulator_bulk_disable(ARRAY_SIZE(imx681_supply_name),
++			       sensor->supplies);
++	return 0;
++}
++
++static int imx681_identify(struct imx681 *sensor)
++{
++	u64 id = 0;
++	int ret;
++
++	ret = cci_read(sensor->regmap, IMX681_REG_MODEL_ID, &id, NULL);
++	if (ret) {
++		dev_err(sensor->dev, "model ID read failed: %d\n", ret);
++		return ret;
++	}
++
++	dev_info(sensor->dev, "detected model id 0x%04llx%s\n", id,
++		 id == IMX681_MODEL_ID ? " (IMX681)" : " (UNEXPECTED)");
++
++	return id == IMX681_MODEL_ID ? 0 : -ENODEV;
++}
++
++/* ----------------------------------------------------------- controls */
++
++static int imx681_s_ctrl(struct v4l2_ctrl *ctrl)
++{
++	struct imx681 *sensor =
++		container_of(ctrl->handler, struct imx681, ctrl_handler);
++	int ret = 0;
++
++	if (ctrl->id == V4L2_CID_VBLANK) {
++		unsigned int expo_max = IMX681_HEIGHT + ctrl->val -
++					IMX681_EXPOSURE_MARGIN;
++
++		ret = __v4l2_ctrl_modify_range(sensor->expo_ctrl,
++					       sensor->expo_ctrl->minimum,
++					       expo_max, 1,
++					       min_t(int, IMX681_EXPOSURE_DEF,
++						     expo_max));
++		if (ret)
++			return ret;
++	}
++
++	if (!pm_runtime_get_if_in_use(sensor->dev))
++		return 0;
++
++	cci_write(sensor->regmap, IMX681_REG_GROUP_HOLD, 1, &ret);
++	switch (ctrl->id) {
++	case V4L2_CID_VBLANK:
++		cci_write(sensor->regmap, IMX681_REG_FRAME_LENGTH,
++			  IMX681_HEIGHT + ctrl->val, &ret);
++		break;
++	case V4L2_CID_EXPOSURE:
++		cci_write(sensor->regmap, IMX681_REG_EXPOSURE, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_ANALOGUE_GAIN:
++		cci_write(sensor->regmap, IMX681_REG_ANALOG_GAIN, ctrl->val,
++			  &ret);
++		break;
++	case V4L2_CID_DIGITAL_GAIN:
++		cci_write(sensor->regmap, IMX681_REG_DIGITAL_GAIN, ctrl->val,
++			  &ret);
++		break;
++	default:
++		break;
++	}
++	cci_write(sensor->regmap, IMX681_REG_GROUP_HOLD, 0, &ret);
++
++	pm_runtime_put_autosuspend(sensor->dev);
++
++	return ret;
++}
++
++static const struct v4l2_ctrl_ops imx681_ctrl_ops = {
++	.s_ctrl = imx681_s_ctrl,
++};
++
++static int imx681_init_controls(struct imx681 *sensor)
++{
++	struct v4l2_ctrl_handler *hdl = &sensor->ctrl_handler;
++	const struct v4l2_ctrl_ops *ops = &imx681_ctrl_ops;
++	struct v4l2_fwnode_device_properties props;
++	struct v4l2_ctrl *ctrl;
++	int ret;
++
++	ret = v4l2_fwnode_device_parse(sensor->dev, &props);
++	if (ret)
++		return ret;
++
++	/* v4l2_fwnode_device_properties can add two more controls. */
++	ret = v4l2_ctrl_handler_init(hdl, 10);
++	if (ret)
++		return ret;
++
++	ctrl = v4l2_ctrl_new_int_menu(hdl, ops, V4L2_CID_LINK_FREQ,
++				      ARRAY_SIZE(imx681_link_freq_menu) - 1, 0,
++				      imx681_link_freq_menu);
++	if (ctrl)
++		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	ctrl = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_PIXEL_RATE,
++				 IMX681_PIXEL_RATE, IMX681_PIXEL_RATE, 1,
++				 IMX681_PIXEL_RATE);
++	if (ctrl)
++		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	ctrl = v4l2_ctrl_new_std(hdl, ops, V4L2_CID_HBLANK,
++				 IMX681_LINE_LENGTH - IMX681_WIDTH,
++				 IMX681_LINE_LENGTH - IMX681_WIDTH, 1,
++				 IMX681_LINE_LENGTH - IMX681_WIDTH);
++	if (ctrl)
++		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
++
++	sensor->vblank_ctrl =
++		v4l2_ctrl_new_std(hdl, ops, V4L2_CID_VBLANK,
++				  IMX681_EXPOSURE_MARGIN,
++				  IMX681_FRAME_LENGTH_MAX - IMX681_HEIGHT, 1,
++				  IMX681_FRAME_LENGTH_DEF - IMX681_HEIGHT);
++	sensor->expo_ctrl =
++		v4l2_ctrl_new_std(hdl, ops, V4L2_CID_EXPOSURE, 8,
++				  IMX681_FRAME_LENGTH_DEF -
++				  IMX681_EXPOSURE_MARGIN, 1,
++				  IMX681_EXPOSURE_DEF);
++	sensor->again_ctrl =
++		v4l2_ctrl_new_std(hdl, ops, V4L2_CID_ANALOGUE_GAIN, 0,
++				  IMX681_AGAIN_MAX, 1, 0);
++	sensor->dgain_ctrl =
++		v4l2_ctrl_new_std(hdl, ops, V4L2_CID_DIGITAL_GAIN, 0x0100,
++				  0x0fff, 1, IMX681_DGAIN_DEF);
++
++	v4l2_ctrl_new_fwnode_properties(hdl, ops, &props);
++
++	if (hdl->error) {
++		ret = hdl->error;
++		v4l2_ctrl_handler_free(hdl);
++		return ret;
++	}
++
++	sensor->sd.ctrl_handler = hdl;
++	return 0;
++}
++
++/* ------------------------------------------------------------- format */
++
++static void imx681_fill_fmt(struct v4l2_mbus_framefmt *fmt)
++{
++	fmt->code = IMX681_MBUS_CODE;
++	fmt->width = IMX681_WIDTH;
++	fmt->height = IMX681_HEIGHT;
++	fmt->field = V4L2_FIELD_NONE;
++	fmt->colorspace = V4L2_COLORSPACE_RAW;
++	fmt->ycbcr_enc = V4L2_YCBCR_ENC_DEFAULT;
++	fmt->quantization = V4L2_QUANTIZATION_FULL_RANGE;
++	fmt->xfer_func = V4L2_XFER_FUNC_NONE;
++}
++
++static int imx681_enum_mbus_code(struct v4l2_subdev *sd,
++				 struct v4l2_subdev_state *state,
++				 struct v4l2_subdev_mbus_code_enum *code)
++{
++	if (code->index)
++		return -EINVAL;
++	code->code = IMX681_MBUS_CODE;
++	return 0;
++}
++
++static int imx681_enum_frame_size(struct v4l2_subdev *sd,
++				  struct v4l2_subdev_state *state,
++				  struct v4l2_subdev_frame_size_enum *fse)
++{
++	if (fse->index || fse->code != IMX681_MBUS_CODE)
++		return -EINVAL;
++	fse->min_width = IMX681_WIDTH;
++	fse->max_width = IMX681_WIDTH;
++	fse->min_height = IMX681_HEIGHT;
++	fse->max_height = IMX681_HEIGHT;
++	return 0;
++}
++
++static int imx681_set_pad_fmt(struct v4l2_subdev *sd,
++			      struct v4l2_subdev_state *state,
++			      struct v4l2_subdev_format *fmt)
++{
++	imx681_fill_fmt(&fmt->format);
++	*v4l2_subdev_state_get_format(state, 0) = fmt->format;
++	return 0;
++}
++
++static int imx681_get_selection(struct v4l2_subdev *sd,
++				struct v4l2_subdev_state *state,
++				struct v4l2_subdev_selection *sel)
++{
++	switch (sel->target) {
++	case V4L2_SEL_TGT_CROP:
++		sel->r = *v4l2_subdev_state_get_crop(state, sel->pad);
++		break;
++	case V4L2_SEL_TGT_CROP_DEFAULT:
++	case V4L2_SEL_TGT_CROP_BOUNDS:
++		sel->r.left = 0;
++		sel->r.top = 0;
++		sel->r.width = IMX681_WIDTH;
++		sel->r.height = IMX681_HEIGHT;
++		break;
++	default:
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++static int imx681_init_state(struct v4l2_subdev *sd,
++			     struct v4l2_subdev_state *state)
++{
++	imx681_fill_fmt(v4l2_subdev_state_get_format(state, 0));
++	*v4l2_subdev_state_get_crop(state, 0) = (struct v4l2_rect) {
++		.width = IMX681_WIDTH,
++		.height = IMX681_HEIGHT,
++	};
++
++	return 0;
++}
++
++/* ------------------------------------------------------------ streaming */
++
++static int imx681_start_streaming(struct imx681 *sensor)
++{
++	int ret;
++
++	ret = pm_runtime_resume_and_get(sensor->dev);
++	if (ret < 0)
++		return ret;
++
++	ret = cci_multi_reg_write(sensor->regmap, imx681_global_init_table,
++				  ARRAY_SIZE(imx681_global_init_table), NULL);
++	if (!ret)
++		ret = cci_multi_reg_write(sensor->regmap,
++					  imx681_mode_3840x2640,
++					  ARRAY_SIZE(imx681_mode_3840x2640),
++					  NULL);
++	if (!ret)
++		ret = cci_write(sensor->regmap, IMX681_REG_FRAME_LENGTH,
++				IMX681_HEIGHT + sensor->vblank_ctrl->val,
++				NULL);
++	if (ret)
++		goto err_rpm_put;
++
++	ret = __v4l2_ctrl_handler_setup(&sensor->ctrl_handler);
++	if (ret)
++		goto err_rpm_put;
++
++	ret = cci_write(sensor->regmap, IMX681_REG_MODE_SELECT,
++			IMX681_MODE_STREAMING, NULL);
++	if (ret)
++		goto err_rpm_put;
++
++	dev_dbg(sensor->dev, "streaming started\n");
++	return 0;
++
++err_rpm_put:
++	dev_err(sensor->dev, "failed to start streaming: %d\n", ret);
++	pm_runtime_put(sensor->dev);
++	return ret;
++}
++
++static int imx681_stop_streaming(struct imx681 *sensor)
++{
++	int ret;
++
++	ret = cci_write(sensor->regmap, IMX681_REG_MODE_SELECT,
++			IMX681_MODE_STANDBY, NULL);
++	pm_runtime_put_autosuspend(sensor->dev);
++	return ret;
++}
++
++static int imx681_s_stream(struct v4l2_subdev *sd, int enable)
++{
++	struct imx681 *sensor = to_imx681(sd);
++
++	return enable ? imx681_start_streaming(sensor) :
++			imx681_stop_streaming(sensor);
++}
++
++static const struct v4l2_subdev_video_ops imx681_video_ops = {
++	.s_stream = imx681_s_stream,
++};
++
++static const struct v4l2_subdev_pad_ops imx681_pad_ops = {
++	.enum_mbus_code = imx681_enum_mbus_code,
++	.enum_frame_size = imx681_enum_frame_size,
++	.get_fmt = v4l2_subdev_get_fmt,
++	.set_fmt = imx681_set_pad_fmt,
++	.get_selection = imx681_get_selection,
++};
++
++static const struct v4l2_subdev_ops imx681_subdev_ops = {
++	.video = &imx681_video_ops,
++	.pad = &imx681_pad_ops,
++};
++
++static const struct v4l2_subdev_internal_ops imx681_internal_ops = {
++	.init_state = imx681_init_state,
++};
++
++static int imx681_probe(struct i2c_client *client)
++{
++	struct device *dev = &client->dev;
++	struct imx681 *sensor;
++	unsigned int i;
++	int ret;
++
++	sensor = devm_kzalloc(dev, sizeof(*sensor), GFP_KERNEL);
++	if (!sensor)
++		return -ENOMEM;
++	sensor->dev = dev;
++
++	v4l2_i2c_subdev_init(&sensor->sd, client, &imx681_subdev_ops);
++	sensor->sd.internal_ops = &imx681_internal_ops;
++
++	for (i = 0; i < ARRAY_SIZE(imx681_supply_name); i++)
++		sensor->supplies[i].supply = imx681_supply_name[i];
++	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(imx681_supply_name),
++				      sensor->supplies);
++	if (ret)
++		return dev_err_probe(dev, ret, "failed to get regulators\n");
++
++	sensor->xclk = devm_clk_get(dev, NULL);
++	if (IS_ERR(sensor->xclk))
++		return dev_err_probe(dev, PTR_ERR(sensor->xclk),
++				     "failed to get xclk\n");
++
++	sensor->reset_gpio = devm_gpiod_get_optional(dev, "reset",
++						     GPIOD_OUT_HIGH);
++	if (IS_ERR(sensor->reset_gpio))
++		return dev_err_probe(dev, PTR_ERR(sensor->reset_gpio),
++				     "failed to get reset gpio\n");
++
++	sensor->regmap = devm_cci_regmap_init_i2c(client, 16);
++	if (IS_ERR(sensor->regmap))
++		return dev_err_probe(dev, PTR_ERR(sensor->regmap),
++				     "failed to init regmap\n");
++
++	ret = imx681_power_on(dev);
++	if (ret)
++		return ret;
++
++	ret = imx681_identify(sensor);
++	if (ret)
++		goto err_power_off;
++
++	ret = imx681_init_controls(sensor);
++	if (ret)
++		goto err_power_off;
++
++	sensor->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE;
++	sensor->pad.flags = MEDIA_PAD_FL_SOURCE;
++	sensor->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
++	ret = media_entity_pads_init(&sensor->sd.entity, 1, &sensor->pad);
++	if (ret)
++		goto err_ctrls;
++
++	ret = v4l2_subdev_init_finalize(&sensor->sd);
++	if (ret)
++		goto err_entity;
++
++	pm_runtime_set_active(dev);
++	pm_runtime_get_noresume(dev);
++	pm_runtime_enable(dev);
++	pm_runtime_set_autosuspend_delay(dev, 2000);
++	pm_runtime_use_autosuspend(dev);
++
++	ret = v4l2_async_register_subdev_sensor(&sensor->sd);
++	if (ret) {
++		dev_err(dev, "async subdev register failed: %d\n", ret);
++		goto err_pm;
++	}
++
++	pm_runtime_put_autosuspend(dev);
++	return 0;
++
++err_pm:
++	pm_runtime_disable(dev);
++	pm_runtime_put_noidle(dev);
++	v4l2_subdev_cleanup(&sensor->sd);
++err_entity:
++	media_entity_cleanup(&sensor->sd.entity);
++err_ctrls:
++	v4l2_ctrl_handler_free(&sensor->ctrl_handler);
++err_power_off:
++	imx681_power_off(dev);
++	return ret;
++}
++
++static void imx681_remove(struct i2c_client *client)
++{
++	struct v4l2_subdev *sd = i2c_get_clientdata(client);
++	struct imx681 *sensor = to_imx681(sd);
++
++	v4l2_async_unregister_subdev(sd);
++	v4l2_subdev_cleanup(sd);
++	media_entity_cleanup(&sd->entity);
++	v4l2_ctrl_handler_free(&sensor->ctrl_handler);
++
++	pm_runtime_disable(&client->dev);
++	if (!pm_runtime_status_suspended(&client->dev))
++		imx681_power_off(&client->dev);
++	pm_runtime_set_suspended(&client->dev);
++}
++
++static const struct dev_pm_ops imx681_pm_ops = {
++	SET_RUNTIME_PM_OPS(imx681_power_off, imx681_power_on, NULL)
++};
++
++static const struct of_device_id imx681_dt_ids[] = {
++	{ .compatible = "sony,imx681" },
++	{ /* sentinel */ }
++};
++MODULE_DEVICE_TABLE(of, imx681_dt_ids);
++
++static struct i2c_driver imx681_i2c_driver = {
++	.driver = {
++		.name = "imx681",
++		.of_match_table = imx681_dt_ids,
++		.pm = &imx681_pm_ops,
++	},
++	.probe = imx681_probe,
++	.remove = imx681_remove,
++};
++
++module_i2c_driver(imx681_i2c_driver);
++
++MODULE_DESCRIPTION("Sony IMX681 sensor driver (Surface Pro 11)");
++MODULE_LICENSE("GPL");
+diff --git a/drivers/media/platform/qcom/camss/camss-csid-680.c b/drivers/media/platform/qcom/camss/camss-csid-680.c
+index 345a67c8f..edac18150 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid-680.c
++++ b/drivers/media/platform/qcom/camss/camss-csid-680.c
+@@ -105,6 +105,7 @@
+ #define		CSI2_RX_CFG0_PHY_TYPE_SEL			24
+ #define		CSI2_RX_CFG0_TPG_MUX_EN				BIT(27)
+ #define		CSI2_RX_CFG0_TPG_MUX_SEL			GENMASK(29, 28)
++#define		CSI2_RX_CFG0_TPG_NUM_SEL			BIT(28)
+ 
+ #define CSID_CSI2_RX_CFG1					0x204
+ #define		CSI2_RX_CFG1_PACKET_ECC_CORRECTION_EN		BIT(0)
+@@ -160,6 +161,7 @@
+ #define CSID_RDI_FRM_DROP_PERIOD(rdi)				(0x544 + 0x100 * (rdi))
+ #define CSID_RDI_IRQ_SUBSAMPLE_PATTERN(rdi)			(0x548 + 0x100 * (rdi))
+ #define CSID_RDI_IRQ_SUBSAMPLE_PERIOD(rdi)			(0x54c + 0x100 * (rdi))
++#define CSID_RDI_RPP_HCROP(rdi)					(0x550 + 0x100 * (rdi))
+ #define CSID_RDI_PIX_DROP_PATTERN(rdi)				(0x558 + 0x100 * (rdi))
+ #define CSID_RDI_PIX_DROP_PERIOD(rdi)				(0x55c + 0x100 * (rdi))
+ #define CSID_RDI_LINE_DROP_PATTERN(rdi)				(0x560 + 0x100 * (rdi))
+@@ -190,8 +192,17 @@ static void __csid_configure_rx(struct csid_device *csid,
+ 	struct camss *camss;
+ 
+ 	camss = csid->camss;
+-	val = (phy->lane_cnt - 1) << CSI2_RX_CFG0_NUM_ACTIVE_LANES;
+-	val |= phy->lane_assign << CSI2_RX_CFG0_DL0_INPUT_SEL;
++	if (phy->bus_type == V4L2_MBUS_CSI2_CPHY) {
++		/* CSID selects a C-PHY trio by the first wire index divided by two. */
++		u8 trio = phy->lane_cnt ? (phy->lane_assign & 0xf) / 2 : 0;
++
++		/* Zero active-lanes encodes one active C-PHY trio. */
++		val = trio << CSI2_RX_CFG0_DL0_INPUT_SEL;
++		val |= BIT(CSI2_RX_CFG0_PHY_TYPE_SEL);
++	} else {
++		val = (phy->lane_cnt - 1) << CSI2_RX_CFG0_NUM_ACTIVE_LANES;
++		val |= phy->lane_assign << CSI2_RX_CFG0_DL0_INPUT_SEL;
++	}
+ 
+ 	if (camss->tpg && csid->tpg_linked &&
+ 	    camss->tpg[phy->csiphy_id].testgen.mode != TPG_PAYLOAD_MODE_DISABLED) {
+@@ -200,6 +211,16 @@ static void __csid_configure_rx(struct csid_device *csid,
+ 	} else {
+ 		val |= (phy->csiphy_id + CSI2_RX_CFG0_PHY_SEL_BASE_IDX)
+ 			<< CSI2_RX_CFG0_PHY_NUM_SEL;
++
++		/*
++		 * Same-machine SP11 Windows programs TPG_NUM_SEL=1 for the
++		 * CSIPHY2 one-trio C-PHY receiver while leaving the TPG mux
++		 * disabled. Preserve that otherwise-inert field on X1E80100 so
++		 * the front-camera receiver uses RX_CFG0 == 0x11300000.
++		 */
++		if (camss->res->version == CAMSS_X1E80100 &&
++		    phy->bus_type == V4L2_MBUS_CSI2_CPHY)
++			val |= CSI2_RX_CFG0_TPG_NUM_SEL;
+ 	}
+ 
+ 	writel(val, csid->base + CSID_CSI2_RX_CFG0);
+@@ -234,9 +255,11 @@ static void __csid_configure_top(struct csid_device *csid)
+ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8 port, u8 vc)
+ {
+ 	struct v4l2_mbus_framefmt *input_format = &csid->fmt[MSM_CSID_PAD_FIRST_SRC + port];
++	struct v4l2_mbus_framefmt *sink_format = &csid->fmt[MSM_CSID_PAD_SINK];
+ 	const struct csid_format_info *format = csid_get_fmt_entry(csid->res->formats->formats,
+ 								   csid->res->formats->nformats,
+ 								   input_format->code);
++	bool crop = csid_is_cphy_raw10_3844(csid, sink_format);
+ 	u8 lane_cnt = csid->phy.lane_cnt;
+ 	u8 dt_id;
+ 	u32 val;
+@@ -244,9 +267,6 @@ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8
+ 	if (!lane_cnt)
+ 		lane_cnt = 4;
+ 
+-	val = 0;
+-	writel(val, csid->base + CSID_RDI_FRM_DROP_PERIOD(port));
+-
+ 	/*
+ 	 * DT_ID is a two bit bitfield that is concatenated with
+ 	 * the four least significant bits of the five bit VC
+@@ -260,9 +280,13 @@ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8
+ 	 * CID   : VC 3:0 << 2 | DT_ID 1:0
+ 	 */
+ 	dt_id = port & 0x03;
++	val = 0;
+ 
+-	/* note: for non-RDI path, this should be format->decode_format */
+-	val |= DECODE_FORMAT_PAYLOAD_ONLY << RDI_CFG0_DECODE_FORMAT;
++	/* Decoding is required for the explicitly selected receiver crop. */
++	if (crop)
++		val |= format->decode_format << RDI_CFG0_DECODE_FORMAT;
++	else
++		val |= DECODE_FORMAT_PAYLOAD_ONLY << RDI_CFG0_DECODE_FORMAT;
+ 	val |= format->data_type << RDI_CFG0_DATA_TYPE;
+ 	val |= vc << RDI_CFG0_VIRTUAL_CHANNEL;
+ 	val |= dt_id << RDI_CFG0_DT_ID;
+@@ -271,14 +295,23 @@ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8
+ 	val = RDI_CFG1_TIMESTAMP_STB_FRAME;
+ 	val |= RDI_CFG1_BYTE_CNTR_EN;
+ 	val |= RDI_CFG1_TIMESTAMP_EN;
+-	val |= RDI_CFG1_DROP_H_EN;
+-	val |= RDI_CFG1_DROP_V_EN;
+-	val |= RDI_CFG1_CROP_H_EN;
+-	val |= RDI_CFG1_CROP_V_EN;
+ 	val |= RDI_CFG1_PACKING_MIPI;
++	if (crop) {
++		/* C-PHY RAW10 3844 is the IMX681 route: crop to 4800-byte rows. */
++		writel(3839 << 16, csid->base + CSID_RDI_RPP_HCROP(port));
++		val |= RDI_CFG1_CROP_H_EN;
++	}
+ 
+ 	writel(val, csid->base + CSID_RDI_CFG1(port));
+ 
++	/* Program an explicit keep-all state for every drop engine. */
++	writel(1, csid->base + CSID_RDI_FRM_DROP_PERIOD(port));
++	writel(0, csid->base + CSID_RDI_FRM_DROP_PATTERN(port));
++	writel(1, csid->base + CSID_RDI_PIX_DROP_PERIOD(port));
++	writel(0, csid->base + CSID_RDI_PIX_DROP_PATTERN(port));
++	writel(1, csid->base + CSID_RDI_LINE_DROP_PERIOD(port));
++	writel(0, csid->base + CSID_RDI_LINE_DROP_PATTERN(port));
++
+ 	val = 0;
+ 	writel(val, csid->base + CSID_RDI_IRQ_SUBSAMPLE_PERIOD(port));
+ 
+@@ -296,6 +329,44 @@ static void __csid_configure_rdi_stream(struct csid_device *csid, u8 enable, u8
+ 	writel(val, csid->base + CSID_RDI_CFG0(port));
+ }
+ 
++static void csid_log_status(struct csid_device *csid)
++{
++	struct v4l2_mbus_framefmt *sink_format =
++		&csid->fmt[MSM_CSID_PAD_SINK];
++	int i;
++
++	if (csid->camss->res->version != CAMSS_X1E80100 ||
++	    !csid_is_sp11_imx681_format(csid, sink_format))
++		return;
++
++	dev_info(csid->camss->dev,
++		 "CSID%u IMX681 stop: RX_CFG0=%#010x RX_CFG1=%#010x TOTAL_PKTS=%u ECC=%u CRC=%u\n",
++		 csid->id, readl(csid->base + CSID_CSI2_RX_CFG0),
++		 readl(csid->base + CSID_CSI2_RX_CFG1),
++		 readl(csid->base + CSID_CSI2_RX_TOTAL_PKTS_RCVD),
++		 readl(csid->base + CSID_CSI2_RX_STATS_ECC),
++		 readl(csid->base + CSID_CSI2_RX_CRC_ERRORS));
++	dev_info(csid->camss->dev,
++		 "CSID%u IMX681 IRQ: TOP=%#010x BUF_DONE=%#010x RX=%#010x\n",
++		 csid->id, readl(csid->base + CSID_TOP_IRQ_STATUS),
++		 readl(csid->base + CSID_BUF_DONE_IRQ_STATUS),
++		 readl(csid->base + CSID_CSI2_RX_IRQ_STATUS));
++
++	for (i = 0; i < MSM_CSID_MAX_SRC_STREAMS; i++) {
++		if (!(csid->phy.en_vc & BIT(i)))
++			continue;
++
++		dev_info(csid->camss->dev,
++			 "CSID%u IMX681 linked RDI%d: IRQ=%#010x CFG0=%#010x CTRL=%#010x CFG1=%#010x HCROP=%#010x\n",
++			 csid->id, i,
++			 readl(csid->base + CSID_CSI2_RDIN_IRQ_STATUS(i)),
++			 readl(csid->base + CSID_RDI_CFG0(i)),
++			 readl(csid->base + CSID_RDI_CTRL(i)),
++			 readl(csid->base + CSID_RDI_CFG1(i)),
++			 readl(csid->base + CSID_RDI_RPP_HCROP(i)));
++	}
++}
++
+ static void csid_configure_stream(struct csid_device *csid, u8 enable)
+ {
+ 	int i;
+@@ -425,6 +496,7 @@ static void csid_subdev_init(struct csid_device *csid) {}
+ const struct csid_hw_ops csid_ops_680 = {
+ 	.configure_testgen_pattern = NULL,
+ 	.configure_stream = csid_configure_stream,
++	.log_status = csid_log_status,
+ 	.hw_version = csid_hw_version,
+ 	.isr = csid_isr,
+ 	.reset = csid_reset,
+diff --git a/drivers/media/platform/qcom/camss/camss-csid.c b/drivers/media/platform/qcom/camss/camss-csid.c
+index 48459b46a..1388e948a 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid.c
++++ b/drivers/media/platform/qcom/camss/camss-csid.c
+@@ -532,6 +532,27 @@ const struct csid_format_info *csid_get_fmt_entry(const struct csid_format_info
+ 	return &formats[0];
+ }
+ 
++bool csid_is_cphy_raw10_3844(struct csid_device *csid,
++			     const struct v4l2_mbus_framefmt *format)
++{
++	return format->width == 3844 &&
++	       csid_is_sp11_imx681_format(csid, format);
++}
++
++bool csid_is_sp11_imx681_format(struct csid_device *csid,
++				const struct v4l2_mbus_framefmt *format)
++{
++	const struct csid_format_info *fmt;
++
++	fmt = csid_get_fmt_entry(csid->res->formats->formats,
++				 csid->res->formats->nformats, format->code);
++
++	/* These explicit transport/geometry signatures are unique to the IMX681. */
++	return csid->phy.bus_type == V4L2_MBUS_CSI2_CPHY &&
++	       (format->width == 3840 || format->width == 3844) &&
++	       format->height == 2640 && fmt->data_type == MIPI_CSI2_DT_RAW10;
++}
++
+ /*
+  * csid_set_clock_rates - Calculate and set clock rates on CSID module
+  * @csiphy: CSID device
+@@ -557,7 +578,10 @@ static int csid_set_clock_rates(struct csid_device *csid)
+ 		if (!strcmp(clock->name, "csi0") ||
+ 		    !strcmp(clock->name, "csi1") ||
+ 		    !strcmp(clock->name, "csi2") ||
+-		    !strcmp(clock->name, "csi3")) {
++		    !strcmp(clock->name, "csi3") ||
++		    (csid->camss->res->version == CAMSS_X1E80100 &&
++		     (!strcmp(clock->name, "csid") ||
++		      !strcmp(clock->name, "csid_csiphy_rx")))) {
+ 			u64 min_rate = link_freq / 4;
+ 			long rate;
+ 
+@@ -777,6 +801,10 @@ static int csid_set_stream(struct v4l2_subdev *sd, int enable)
+ 			return -ENOLINK;
+ 	}
+ 
++	/* Sample status before pipeline PM turns the CSID clocks off. */
++	if (!enable && csid->res->hw_ops->log_status)
++		csid->res->hw_ops->log_status(csid);
++
+ 	if (csid->phy.need_vc_update) {
+ 		csid->res->hw_ops->configure_stream(csid, enable);
+ 		csid->phy.need_vc_update = false;
+@@ -845,13 +873,17 @@ static void csid_try_format(struct csid_device *csid,
+ 	case MSM_CSID_PAD_SRC:
+ 		if (csid->testgen.nmodes == CSID_PAYLOAD_MODE_DISABLED ||
+ 		    csid->testgen_mode->cur.val == 0) {
+-			/* Test generator is disabled, */
+-			/* keep pad formats in sync */
++			const struct v4l2_mbus_framefmt *sink_format;
+ 			u32 code = fmt->code;
+ 
+-			*fmt = *__csid_get_format(csid, sd_state,
+-						      MSM_CSID_PAD_SINK, which);
++			/* Test generator is disabled, */
++			/* keep pad formats in sync */
++			sink_format = __csid_get_format(csid, sd_state,
++							MSM_CSID_PAD_SINK, which);
++			*fmt = *sink_format;
+ 			fmt->code = csid->res->hw_ops->src_pad_code(csid, fmt->code, 0, code);
++			if (csid_is_cphy_raw10_3844(csid, sink_format))
++				fmt->width = 3840;
+ 		} else {
+ 			/* Test generator is enabled, set format on source */
+ 			/* pad to allow test generator usage */
+@@ -1275,6 +1307,7 @@ static int csid_link_setup(struct media_entity *entity,
+ 		if (sd->grp_id == TPG_GRP_ID) {
+ 			tpg = v4l2_get_subdevdata(sd);
+ 
++			csid->phy.bus_type = V4L2_MBUS_CSI2_DPHY;
+ 			csid->phy.lane_cnt = tpg->res->lane_cnt;
+ 			csid->phy.csiphy_id = tpg->id;
+ 			csid->phy.lane_assign = csid_get_lane_assign(NULL, csid->phy.lane_cnt);
+@@ -1288,6 +1321,7 @@ static int csid_link_setup(struct media_entity *entity,
+ 				return -EPERM;
+ 
+ 			csid->phy.csiphy_id = csiphy->id;
++			csid->phy.bus_type = csiphy->cfg.csi2->bus_type;
+ 
+ 			lane_cfg = &csiphy->cfg.csi2->lane_cfg;
+ 			csid->phy.lane_cnt = lane_cfg->num_data;
+diff --git a/drivers/media/platform/qcom/camss/camss-csid.h b/drivers/media/platform/qcom/camss/camss-csid.h
+index 5296b10f6..7a91ff319 100644
+--- a/drivers/media/platform/qcom/camss/camss-csid.h
++++ b/drivers/media/platform/qcom/camss/camss-csid.h
+@@ -65,6 +65,7 @@ struct csid_testgen_config {
+ };
+ 
+ struct csid_phy_config {
++	enum v4l2_mbus_type bus_type;
+ 	u8 csiphy_id;
+ 	u8 lane_cnt;
+ 	u32 lane_assign;
+@@ -81,6 +82,12 @@ struct csid_hw_ops {
+ 	 */
+ 	void (*configure_stream)(struct csid_device *csid, u8 enable);
+ 
++	/*
++	 * log_status - Log a read-only hardware status snapshot while powered
++	 * @csid: CSID device
++	 */
++	void (*log_status)(struct csid_device *csid);
++
+ 	/*
+ 	 * configure_testgen_pattern - Validates and configures output pattern mode
+ 	 * of test pattern generator
+@@ -196,6 +203,11 @@ const struct csid_format_info *csid_get_fmt_entry(const struct csid_format_info
+ 						  unsigned int nformats,
+ 						  u32 code);
+ 
++bool csid_is_cphy_raw10_3844(struct csid_device *csid,
++			     const struct v4l2_mbus_framefmt *format);
++bool csid_is_sp11_imx681_format(struct csid_device *csid,
++				const struct v4l2_mbus_framefmt *format);
++
+ int msm_csid_subdev_init(struct camss *camss, struct csid_device *csid,
+ 			 const struct camss_subdev_resources *res, u8 id);
+ 
+diff --git a/drivers/media/platform/qcom/camss/camss-csiphy.h b/drivers/media/platform/qcom/camss/camss-csiphy.h
+index 8c3319f2c..ad7a99882 100644
+--- a/drivers/media/platform/qcom/camss/camss-csiphy.h
++++ b/drivers/media/platform/qcom/camss/camss-csiphy.h
+@@ -43,6 +43,7 @@ struct csiphy_lanes_cfg {
+ };
+ 
+ struct csiphy_csi2_cfg {
++	enum v4l2_mbus_type bus_type;
+ 	struct csiphy_lanes_cfg lane_cfg;
+ };
+ 
+diff --git a/drivers/media/platform/qcom/camss/camss-vfe-680.c b/drivers/media/platform/qcom/camss/camss-vfe-680.c
+index 99036e7c1..db1c0e0d2 100644
+--- a/drivers/media/platform/qcom/camss/camss-vfe-680.c
++++ b/drivers/media/platform/qcom/camss/camss-vfe-680.c
+@@ -38,6 +38,7 @@
+ 
+ #define VFE_BUS_WRITE_CLIENT_CFG(vfe, c)	((vfe_is_lite(vfe) ? 0x400 : 0xe00) + (c) * 0x100)
+ #define		VFE_BUS_WRITE_CLIENT_CFG_EN	BIT(0)
++#define		VFE_BUS_WRITE_CLIENT_CFG_MODE_MIPI_RAW	BIT(16)
+ #define VFE_BUS_IMAGE_ADDR(vfe, c)		((vfe_is_lite(vfe) ? 0x404 : 0xe04) + (c) * 0x100)
+ #define VFE_BUS_FRAME_INCR(vfe, c)		((vfe_is_lite(vfe) ? 0x408 : 0xe08) + (c) * 0x100)
+ #define VFE_BUS_IMAGE_CFG0(vfe, c)		((vfe_is_lite(vfe) ? 0x40c : 0xe0c) + (c) * 0x100)
+@@ -186,17 +187,57 @@ static void vfe_wm_start(struct vfe_device *vfe, u8 rdi, struct vfe_line *line)
+ 	vfe_disable_irq(vfe);
+ 
+ 	/* Enable WM */
+-	writel(VFE_BUS_WRITE_CLIENT_CFG_EN,
++	writel(VFE_BUS_WRITE_CLIENT_CFG_EN |
++	       VFE_BUS_WRITE_CLIENT_CFG_MODE_MIPI_RAW,
+ 	       vfe->base + VFE_BUS_WRITE_CLIENT_CFG(vfe, wm));
+ 
+ 	dev_dbg(vfe->camss->dev, "RDI%d WM:%d width %d height %d stride %d\n",
+ 		rdi, wm, pix->width, pix->height, stride);
+ }
+ 
++static bool vfe_is_imx681_raw(struct vfe_device *vfe, u8 rdi)
++{
++	struct v4l2_pix_format_mplane *pix;
++
++	if (vfe->camss->res->version != CAMSS_X1E80100 ||
++	    vfe_is_lite(vfe) || rdi >= vfe->res->line_num)
++		return false;
++
++	pix = &vfe->line[rdi].video_out.active_fmt.fmt.pix_mp;
++
++	return pix->pixelformat == V4L2_PIX_FMT_SRGGB10P &&
++	       pix->width == 3840 && pix->height == 2640 &&
++	       pix->plane_fmt[0].bytesperline == 4800;
++}
++
+ static void vfe_wm_stop(struct vfe_device *vfe, u8 rdi)
+ {
+ 	u8 wm = RDI_WM(rdi);
+ 
++	if (vfe_is_imx681_raw(vfe, rdi)) {
++		dev_info(vfe->camss->dev,
++			 "VFE%u IMX681 RDI%u WM%u stop: CFG=%#010x ADDR=%#010x INCR=%#010x IMG=%#010x/%#010x/%#010x PACKER=%#010x\n",
++			 vfe->id, rdi, wm,
++			 readl(vfe->base + VFE_BUS_WRITE_CLIENT_CFG(vfe, wm)),
++			 readl(vfe->base + VFE_BUS_IMAGE_ADDR(vfe, wm)),
++			 readl(vfe->base + VFE_BUS_FRAME_INCR(vfe, wm)),
++			 readl(vfe->base + VFE_BUS_IMAGE_CFG0(vfe, wm)),
++			 readl(vfe->base + VFE_BUS_IMAGE_CFG1(vfe, wm)),
++			 readl(vfe->base + VFE_BUS_IMAGE_CFG2(vfe, wm)),
++			 readl(vfe->base + VFE_BUS_PACKER_CFG(vfe, wm)));
++		dev_info(vfe->camss->dev,
++			 "VFE%u IMX681 IRQ: TOP=%#010x/%#010x BUS=%#010x/%#010x VIOL=%#010x OVERFLOW=%#010x IMAGE_VIOL=%#010x\n",
++			 vfe->id,
++			 readl(vfe->base + VFE_TOP_IRQn_STATUS(vfe, 0)),
++			 readl(vfe->base + VFE_TOP_IRQn_STATUS(vfe, 1)),
++			 readl(vfe->base + VFE_BUS_IRQn_STATUS(vfe, 0)),
++			 readl(vfe->base + VFE_BUS_IRQn_STATUS(vfe, 1)),
++			 readl(vfe->base + VFE_BUS_WR_VIOLATION_STATUS(vfe)),
++			 readl(vfe->base + VFE_BUS_WR_OVERFLOW_STATUS(vfe)),
++			 readl(vfe->base +
++			       VFE_BUS_WR_IMAGE_VIOLATION_STATUS(vfe)));
++	}
++
+ 	writel(0, vfe->base + VFE_BUS_WRITE_CLIENT_CFG(vfe, wm));
+ }
+ 
+diff --git a/drivers/media/platform/qcom/camss/camss-video.c b/drivers/media/platform/qcom/camss/camss-video.c
+index 0852eb6f1..7ff03ebb5 100644
+--- a/drivers/media/platform/qcom/camss/camss-video.c
++++ b/drivers/media/platform/qcom/camss/camss-video.c
+@@ -249,11 +249,43 @@ static int video_prepare_streaming(struct vb2_queue *q)
+ 	return ret;
+ }
+ 
++static void video_stop_subdevices(struct camss_video *video,
++				  struct media_entity *last_started)
++{
++	struct video_device *vdev = &video->vdev;
++	struct media_entity *entity = &vdev->entity;
++	struct media_pad *pad;
++	struct v4l2_subdev *subdev;
++	int ret;
++
++	while (1) {
++		pad = &entity->pads[0];
++		if (!(pad->flags & MEDIA_PAD_FL_SINK))
++			break;
++
++		pad = media_pad_remote_pad_first(pad);
++		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
++			break;
++
++		entity = pad->entity;
++		subdev = media_entity_to_v4l2_subdev(entity);
++
++		ret = v4l2_subdev_call(subdev, video, s_stream, 0);
++		if (ret < 0 && ret != -ENOIOCTLCMD)
++			dev_err(video->camss->dev,
++				"Video pipeline stop failed: %d\n", ret);
++
++		if (last_started && entity == last_started)
++			break;
++	}
++}
++
+ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
+ {
+ 	struct camss_video *video = vb2_get_drv_priv(q);
+ 	struct video_device *vdev = &video->vdev;
+ 	struct media_entity *entity;
++	struct media_entity *last_started = NULL;
+ 	struct media_pad *pad;
+ 	struct v4l2_subdev *subdev;
+ 	int ret;
+@@ -284,11 +316,15 @@ static int video_start_streaming(struct vb2_queue *q, unsigned int count)
+ 		ret = v4l2_subdev_call(subdev, video, s_stream, 1);
+ 		if (ret < 0 && ret != -ENOIOCTLCMD)
+ 			goto error;
++		if (ret >= 0)
++			last_started = entity;
+ 	}
+ 
+ 	return 0;
+ 
+ error:
++	if (last_started)
++		video_stop_subdevices(video, last_started);
+ 	video_device_pipeline_stop(vdev);
+ 
+ flush_buffers:
+@@ -301,31 +337,8 @@ static void video_stop_streaming(struct vb2_queue *q)
+ {
+ 	struct camss_video *video = vb2_get_drv_priv(q);
+ 	struct video_device *vdev = &video->vdev;
+-	struct media_entity *entity;
+-	struct media_pad *pad;
+-	struct v4l2_subdev *subdev;
+-	int ret;
+-
+-	entity = &vdev->entity;
+-	while (1) {
+-		pad = &entity->pads[0];
+-		if (!(pad->flags & MEDIA_PAD_FL_SINK))
+-			break;
+ 
+-		pad = media_pad_remote_pad_first(pad);
+-		if (!pad || !is_media_entity_v4l2_subdev(pad->entity))
+-			break;
+-
+-		entity = pad->entity;
+-		subdev = media_entity_to_v4l2_subdev(entity);
+-
+-		ret = v4l2_subdev_call(subdev, video, s_stream, 0);
+-
+-		if (ret) {
+-			dev_err(video->camss->dev, "Video pipeline stop failed: %d\n", ret);
+-			return;
+-		}
+-	}
++	video_stop_subdevices(video, NULL);
+ 
+ 	video_device_pipeline_stop(vdev);
+ 
+diff --git a/drivers/media/platform/qcom/camss/camss.c b/drivers/media/platform/qcom/camss/camss.c
+index 6f58e729e..436a36dad 100644
+--- a/drivers/media/platform/qcom/camss/camss.c
++++ b/drivers/media/platform/qcom/camss/camss.c
+@@ -4620,7 +4620,7 @@ struct media_pad *camss_find_sensor_pad(struct media_entity *entity)
+ }
+ 
+ /**
+- * camss_get_link_freq - Get link frequency from sensor
++ * camss_get_link_freq - Get link frequency from the upstream transmitter
+  * @entity: Media entity in the current pipeline
+  * @bpp: Number of bits per pixel for the current format
+  * @lanes: Number of lanes in the link to the sensor
+@@ -4630,13 +4630,38 @@ struct media_pad *camss_find_sensor_pad(struct media_entity *entity)
+ s64 camss_get_link_freq(struct media_entity *entity, unsigned int bpp,
+ 			unsigned int lanes)
+ {
+-	struct media_pad *sensor_pad;
++	struct media_pad *sink_pad;
++	struct media_pad *source_pad;
++	s64 link_freq;
+ 
+-	sensor_pad = camss_find_sensor_pad(entity);
+-	if (!sensor_pad)
+-		return -ENODEV;
++	/*
++	 * A sensor can expose multiple subdevices between its pixel array and
++	 * the receiver.  The link-frequency control belongs to the subdevice
++	 * driving the physical link (for example a CCS scaler), not necessarily
++	 * to the entity classified as MEDIA_ENT_F_CAM_SENSOR.  Walk upstream and
++	 * use the first transmitter source pad that advertises the frequency.
++	 */
++	while (1) {
++		if (WARN_ON(!entity->pads || !entity->num_pads))
++			return -ENODEV;
++
++		sink_pad = &entity->pads[0];
++		if (!(sink_pad->flags & MEDIA_PAD_FL_SINK))
++			return -ENODEV;
++
++		source_pad = media_pad_remote_pad_first(sink_pad);
++		if (!source_pad ||
++		    !is_media_entity_v4l2_subdev(source_pad->entity))
++			return -ENODEV;
++
++		link_freq = v4l2_get_link_freq(source_pad, bpp, 2 * lanes);
++		if (link_freq != -ENOENT)
++			return link_freq;
+ 
+-	return v4l2_get_link_freq(sensor_pad, bpp, 2 * lanes);
++		entity = source_pad->entity;
++		if (entity->function == MEDIA_ENT_F_CAM_SENSOR)
++			return -ENODEV;
++	}
+ }
+ 
+ /*
+@@ -4747,7 +4772,10 @@ static int camss_parse_endpoint_node(struct device *dev,
+ {
+ 	struct csiphy_lanes_cfg *lncfg = &csd->interface.csi2.lane_cfg;
+ 	struct v4l2_mbus_config_mipi_csi2 *mipi_csi2;
++	struct v4l2_fwnode_endpoint remote_vep = { { 0 } };
+ 	struct v4l2_fwnode_endpoint vep = { { 0 } };
++	struct fwnode_handle *remote_ep;
++	enum v4l2_mbus_type bus_type;
+ 	unsigned int i;
+ 	int ret;
+ 
+@@ -4755,20 +4783,33 @@ static int camss_parse_endpoint_node(struct device *dev,
+ 	if (ret)
+ 		return ret;
+ 
+-	/*
+-	 * Most SoCs support both D-PHY and C-PHY standards, but currently only
+-	 * D-PHY is supported in the driver.
+-	 */
+-	if (vep.bus_type != V4L2_MBUS_CSI2_DPHY) {
+-		dev_err(dev, "Unsupported bus type %d\n", vep.bus_type);
++	remote_ep = fwnode_graph_get_remote_endpoint(ep);
++	if (!remote_ep)
++		return -ENOTCONN;
++
++	ret = v4l2_fwnode_endpoint_parse(remote_ep, &remote_vep);
++	fwnode_handle_put(remote_ep);
++	if (ret)
++		return ret;
++
++	/* The transmitter endpoint is authoritative for the CSI-2 PHY type. */
++	bus_type = remote_vep.bus_type == V4L2_MBUS_UNKNOWN ?
++		   vep.bus_type : remote_vep.bus_type;
++	if (bus_type != V4L2_MBUS_CSI2_DPHY &&
++	    bus_type != V4L2_MBUS_CSI2_CPHY) {
++		dev_err(dev, "Unsupported bus type %d\n", bus_type);
+ 		return -EINVAL;
+ 	}
+ 
+ 	csd->interface.csiphy_id = vep.base.port;
++	csd->interface.csi2.bus_type = bus_type;
+ 
+ 	mipi_csi2 = &vep.bus.mipi_csi2;
+-	lncfg->clk.pos = mipi_csi2->clock_lane;
+-	lncfg->clk.pol = mipi_csi2->lane_polarities[0];
++	if (bus_type == V4L2_MBUS_CSI2_DPHY) {
++		lncfg->clk.pos = mipi_csi2->clock_lane;
++		lncfg->clk.pol = mipi_csi2->lane_polarities[0];
++	}
++
+ 	lncfg->num_data = mipi_csi2->num_data_lanes;
+ 
+ 	lncfg->data = devm_kcalloc(dev,
+diff --git a/drivers/phy/qualcomm/phy-qcom-mipi-csi2-cphy-x1e80100.h b/drivers/phy/qualcomm/phy-qcom-mipi-csi2-cphy-x1e80100.h
+new file mode 100644
+index 000000000..370f0abcf
+--- /dev/null
++++ b/drivers/phy/qualcomm/phy-qcom-mipi-csi2-cphy-x1e80100.h
+@@ -0,0 +1,198 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++/*
++ * Qualcomm X1E80100 C-PHY register observations.
++ *
++ * These address/value/delay triples were independently transcribed from
++ * runtime WinDbg MMIO observations on the maintainer's own Surface Pro 11
++ * while its front camera was streaming.  They are hardware observations, not
++ * copied vendor source, decompiled output, or an extracted binary payload.
++ * Delays retain the observed nanosecond argument passed to the common writer.
++ */
++struct x1e80100_cphy_reg {
++	u32 reg_addr;
++	u32 reg_data;
++	u32 delay_ns;
++};
++
++static const struct x1e80100_cphy_reg x1e80100_cphy_reset[] = {
++	{ 0x1000, 0x01, 0x00000014 },
++	{ 0x1000, 0x00, 0x00000000 },
++};
++
++static const struct x1e80100_cphy_reg x1e80100_cphy_toggle[] = {
++	{ 0x025c, 0x10, 0x00000064 },
++	{ 0x025c, 0x00, 0x00000000 },
++	{ 0x065c, 0x10, 0x00000064 },
++	{ 0x065c, 0x00, 0x00000000 },
++	{ 0x0a5c, 0x10, 0x00000064 },
++	{ 0x0a5c, 0x00, 0x00000000 },
++};
++
++static const struct x1e80100_cphy_reg x1e80100_cphy_common[] = {
++	{ 0x1084, 0x00, 0x00000000 },
++	{ 0x108c, 0x00, 0x000003e8 },
++	{ 0x02f0, 0x00, 0x00000000 },
++	{ 0x06f0, 0x00, 0x00000000 },
++	{ 0x0af0, 0x00, 0x00000000 },
++	{ 0x1014, 0x02, 0x00000000 },
++	{ 0x101c, 0x7a, 0x00000000 },
++	{ 0x1018, 0x01, 0x00000000 },
++	{ 0x101c, 0x7a, 0x00000000 },
++};
++
++static const struct x1e80100_cphy_reg x1e80100_cphy_config[] = {
++	{ 0x0268, 0xf1, 0x00 },
++	{ 0x0294, 0x01, 0x00 },
++	{ 0x0278, 0x20, 0x00 },
++	{ 0x0288, 0x20, 0x00 },
++	{ 0x026c, 0x3d, 0x00 },
++	{ 0x028c, 0x30, 0x00 },
++	{ 0x0270, 0x00, 0x00 },
++	{ 0x0274, 0x03, 0x00 },
++	{ 0x0668, 0xf1, 0x00 },
++	{ 0x0694, 0x01, 0x00 },
++	{ 0x0678, 0x20, 0x00 },
++	{ 0x0688, 0x20, 0x00 },
++	{ 0x066c, 0x3d, 0x00 },
++	{ 0x068c, 0x30, 0x00 },
++	{ 0x0670, 0x00, 0x00 },
++	{ 0x0674, 0x03, 0x00 },
++	{ 0x0a68, 0xf1, 0x00 },
++	{ 0x0a94, 0x01, 0x00 },
++	{ 0x0a78, 0x20, 0x00 },
++	{ 0x0a88, 0x20, 0x00 },
++	{ 0x0a6c, 0x3d, 0x00 },
++	{ 0x0a8c, 0x30, 0x00 },
++	{ 0x0a70, 0x00, 0x00 },
++	{ 0x0a74, 0x03, 0x00989680 },
++	{ 0x0294, 0x09, 0x00000000 },
++	{ 0x02f4, 0x00, 0x00000000 },
++	{ 0x02f8, 0x00, 0x00000000 },
++	{ 0x02fc, 0x00, 0x00000000 },
++	{ 0x02f0, 0xef, 0x000f4240 },
++	{ 0x0694, 0x09, 0x00000000 },
++	{ 0x06f4, 0x00, 0x00000000 },
++	{ 0x06f8, 0x00, 0x00000000 },
++	{ 0x06fc, 0x00, 0x00000000 },
++	{ 0x06f0, 0xef, 0x00000000 },
++	{ 0x0a94, 0x09, 0x00000000 },
++	{ 0x0af4, 0x00, 0x00000000 },
++	{ 0x0af8, 0x00, 0x00000000 },
++	{ 0x0afc, 0x00, 0x00000000 },
++	{ 0x0af0, 0xef, 0x00989680 },
++	{ 0x020c, 0x22, 0x00 },
++	{ 0x0208, 0x00, 0x00 },
++	{ 0x0210, 0x00, 0x00 },
++	{ 0x0214, 0x00, 0x00 },
++	{ 0x0204, 0x00, 0x00 },
++	{ 0x02e4, 0x00, 0x00 },
++	{ 0x02e8, 0x7f, 0x00 },
++	{ 0x02ec, 0x7f, 0x00 },
++	{ 0x0218, 0x3e, 0x00 },
++	{ 0x021c, 0x41, 0x00 },
++	{ 0x0220, 0x41, 0x00 },
++	{ 0x0224, 0x7f, 0x00 },
++	{ 0x0228, 0x00, 0x00 },
++	{ 0x022c, 0x00, 0x00 },
++	{ 0x0264, 0x01, 0x00 },
++	{ 0x0244, 0xb2, 0x00 },
++	{ 0x0310, 0x35, 0x00 },
++	{ 0x02bc, 0xd0, 0x00 },
++	{ 0x0254, 0x00, 0x00 },
++	{ 0x0240, 0x00, 0x00 },
++	{ 0x0260, 0xa8, 0x00 },
++	{ 0x0284, 0x00, 0x00 },
++	{ 0x0290, 0x02, 0x00 },
++	{ 0x060c, 0x22, 0x00 },
++	{ 0x0608, 0x00, 0x00 },
++	{ 0x0610, 0x00, 0x00 },
++	{ 0x0614, 0x00, 0x00 },
++	{ 0x0604, 0x00, 0x00 },
++	{ 0x06e4, 0x00, 0x00 },
++	{ 0x06e8, 0x7f, 0x00 },
++	{ 0x06ec, 0x7f, 0x00 },
++	{ 0x0618, 0x3e, 0x00 },
++	{ 0x061c, 0x41, 0x00 },
++	{ 0x0620, 0x41, 0x00 },
++	{ 0x0624, 0x7f, 0x00 },
++	{ 0x0628, 0x00, 0x00 },
++	{ 0x062c, 0x00, 0x00 },
++	{ 0x0664, 0x01, 0x00 },
++	{ 0x0644, 0xb2, 0x00 },
++	{ 0x0710, 0x35, 0x00 },
++	{ 0x06bc, 0xd0, 0x00 },
++	{ 0x0654, 0x00, 0x00 },
++	{ 0x0640, 0x00, 0x00 },
++	{ 0x0660, 0xa8, 0x00 },
++	{ 0x0684, 0x00, 0x00 },
++	{ 0x0690, 0x02, 0x00 },
++	{ 0x0a0c, 0x22, 0x00 },
++	{ 0x0a08, 0x00, 0x00 },
++	{ 0x0a10, 0x00, 0x00 },
++	{ 0x0a14, 0x00, 0x00 },
++	{ 0x0a00, 0x00, 0x00 },
++	{ 0x0a04, 0x00, 0x00 },
++	{ 0x0ae4, 0x00, 0x00 },
++	{ 0x0ae8, 0x7f, 0x00 },
++	{ 0x0aec, 0x7f, 0x00 },
++	{ 0x0a18, 0x3e, 0x00 },
++	{ 0x0a1c, 0x41, 0x00 },
++	{ 0x0a20, 0x41, 0x00 },
++	{ 0x0a24, 0x7f, 0x00 },
++	{ 0x0a28, 0x00, 0x00 },
++	{ 0x0a2c, 0x00, 0x00 },
++	{ 0x0a64, 0x01, 0x00 },
++	{ 0x0a44, 0xb2, 0x00 },
++	{ 0x0b10, 0x35, 0x00 },
++	{ 0x0abc, 0xd0, 0x00 },
++	{ 0x0a54, 0x00, 0x00 },
++	{ 0x0a40, 0x00, 0x00 },
++	{ 0x0a60, 0xa8, 0x00 },
++	{ 0x0a84, 0x00, 0x00 },
++	{ 0x0a90, 0x02, 0x00 },
++	{ 0x102c, 0xff, 0x00 },
++	{ 0x1030, 0xfe, 0x00 },
++	{ 0x1034, 0xe2, 0x00 },
++	{ 0x1038, 0xdf, 0x00 },
++	{ 0x103c, 0x5f, 0x00 },
++	{ 0x1040, 0xfc, 0x00 },
++	{ 0x1044, 0xfb, 0x00 },
++	{ 0x1048, 0x8b, 0x00 },
++	{ 0x104c, 0x7f, 0x00 },
++	{ 0x1050, 0xbf, 0x00 },
++	{ 0x1054, 0xff, 0x00 },
++	{ 0x1000, 0x0e, 0x00 },
++};
++
++static const struct x1e80100_cphy_reg x1e80100_cphy_irq_clear[] = {
++	{ 0x1058, 0xff, 0x00000000 },
++	{ 0x105c, 0xff, 0x00000000 },
++	{ 0x1060, 0xff, 0x00000000 },
++	{ 0x1064, 0xff, 0x00000000 },
++	{ 0x1068, 0xff, 0x00000000 },
++	{ 0x106c, 0xff, 0x00000000 },
++	{ 0x1070, 0xff, 0x00000000 },
++	{ 0x1074, 0xff, 0x00000000 },
++	{ 0x1078, 0xff, 0x00000000 },
++	{ 0x107c, 0xff, 0x00000000 },
++	{ 0x1080, 0xff, 0x00000064 },
++	{ 0x1028, 0x01, 0x00000064 },
++	{ 0x1058, 0x00, 0x00000000 },
++	{ 0x105c, 0x00, 0x00000000 },
++	{ 0x1060, 0x00, 0x00000000 },
++	{ 0x1064, 0x00, 0x00000000 },
++	{ 0x1068, 0x00, 0x00000000 },
++	{ 0x106c, 0x00, 0x00000000 },
++	{ 0x1070, 0x00, 0x00000000 },
++	{ 0x1074, 0x00, 0x00000000 },
++	{ 0x1078, 0x00, 0x00000000 },
++	{ 0x107c, 0x00, 0x00000000 },
++	{ 0x1080, 0x00, 0x00000064 },
++	{ 0x1028, 0x00, 0x00000064 },
++};
++
++static const struct x1e80100_cphy_reg x1e80100_cphy_shutdown[] = {
++	{ 0x1014, 0x00, 0x00000000 },
++	{ 0x101c, 0x00, 0x00000000 },
++	{ 0x1018, 0x00, 0x00000000 },
++};
+diff --git a/include/linux/phy/phy.h b/include/linux/phy/phy.h
+index 14b924a88..3d96c0361 100644
+--- a/include/linux/phy/phy.h
++++ b/include/linux/phy/phy.h
+@@ -41,6 +41,7 @@ enum phy_mode {
+ 	PHY_MODE_PCIE,
+ 	PHY_MODE_ETHERNET,
+ 	PHY_MODE_MIPI_DPHY,
++	PHY_MODE_MIPI_CPHY,
+ 	PHY_MODE_SATA,
+ 	PHY_MODE_LVDS,
+ 	PHY_MODE_DP,
+-- 
+2.43.0
+

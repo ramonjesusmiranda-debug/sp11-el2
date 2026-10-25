@@ -1,5 +1,6 @@
 # linux-sp11-el2: igual que linux-sp11-reposo + 14 parches de jglathe/linux_ms_dev_kit (smp2p, remoteproc attach,
 # x1-el2 broken-reset). SOLO para arrancar en EL2 con slbounce desde la consola UEFI. 16-10-2026
+# 24-10-2026: rebasado a 7.2.11-arch1 (d6333a4: spi-hid v5 + rebind del G6 tras reset, 5G, cpufreq/platform_profile ya dentro → fuera el 10).
 # Basado en linux-sp11 de dwhinham/archlinux-repo (7.2.8.arch1-3), con parches de x1e-sleep (justririll) y
 # el PR dwhinham/linux-sp11#2. Kernel aparte: el linux-sp11 original sigue instalado como respaldo. 15-10-2026
 # Maintainer: Dale Whinham <daleyo@gmail.com>
@@ -13,11 +14,11 @@
 # Upstream maintainer: Jan Alexander Steffens (heftig) <heftig@archlinux.org>
 
 pkgbase=linux-sp11-el2
-pkgver=7.2.8.arch1
-pkgrel=11
+pkgver=7.2.11.arch1
+pkgrel=4
 pkgdesc='Surface Pro 11 Linux EXPERIMENTAL para arrancar en EL2 (slbounce): reposo + enganche a DSP ya arrancados'
 url='https://github.com/dwhinham/linux-sp11'
-_commit=616a9f22113e7dc96e558b4426424ea1d7511092
+_commit=d6333a45f9bc9a1fa82a90146dbc9c159e83cd1b
 arch=(
   aarch64
 )
@@ -64,7 +65,6 @@ source=(
   "07-lpass-macro-release-votes.patch"
   "08-syscon-skip-clock-providers.patch"
   "09-pcie-qcom-gen1-icc-vote.patch"
-  "10-platform-profile-dt-y-scmi-boost.patch"
   "11-msm-dp-psr-vsc-software.patch"
   "111-d0143aa071fd.patch"
   "112-6c8ed065898f.patch"
@@ -122,10 +122,33 @@ source=(
   "174-dts-hamoa-pcie-t-power-on.patch"
   "175-nvme-quirks-device-param.patch"
   "176-surface-flex-kbd-backlight-and-bat-event.patch"
+  "177-iris-el2-vpu-boot-skext.patch"
+  # 24-10-2026 cámaras: Linaro CSI2 PHY v18 + camss v20 + CCI/CAMSS de hamoa, IMX681 frontal por C-PHY (PR #22 de ooaklee), OV13858 con OF
+  "180-cam-dt-bindings-phy-qcom-Add-CSI2-C-PHY-DPHY-schema.patch"
+  "181-cam-phy-qcom-mipi-csi2-Add-a-CSI2-MIPI-DPHY-driver.patch"
+  "182-cam-phy-core-Fix-race-condition-between-_of_phy_get-and-.patch"
+  "183-cam-phy-core-Add-phy_get_by_of_node.patch"
+  "184-cam-phy-core-Add-devm_phy_get_by_of_node.patch"
+  "185-cam-phy-core-Add-missing-kerneldoc-colon-in-two-location.patch"
+  "186-cam-media-qcom-camss-Add-support-for-PHY-API-devices.patch"
+  "187-cam-media-qcom-camss-Use-data-lanes-starting-at-1-for-ne.patch"
+  "188-cam-dt-bindings-media-qcom-x1e80100-camss-Describe-iommu.patch"
+  "189-cam-dt-bindings-media-qcom-x1e80100-camss-Make-vdd-csiph.patch"
+  "190-cam-arm64-dts-qcom-x1e80100-Add-CCI-definitions.patch"
+  "191-cam-arm64-dts-qcom-x1e80100-Add-CAMSS-block-definition.patch"
+  "192-cam-arm64-dts-qcom-x1e80100-crd-Add-pm8010-CRD-pmic-id-m.patch"
+  "193-cam-arm64-dts-qcom-denali-pm8010-l7b-l16b-CCI-CAMSS-y-OV.patch"
+  "194-cam-media-SP11-IMX681-frontal-PR-22-ooaklee-partes-que-a.patch"
+  "195-cam-phy-qcom-mipi-csi2-C-PHY-de-X1E80100-tr-o-0-2-406-Gs.patch"
+  "196-cam-arm64-dts-qcom-denali-frontal-IMX681-por-C-PHY-CSIPH.patch"
+  "197-cam-media-i2c-ov13858-soporte-OF-reguladores-reset-MCLK.patch"
+  "198-cam-denali-voltajes-ldo.patch"
+  # 25-10-2026 RFC 1191458 (tvlad744): pmic_glink retiene avisos durante la suspensión (ps883x -EACCES al dormir con hub)
+  "199-pmic-glink-hold-back-notifications-sleep.patch"
 )
 source_aarch64=(config.aarch64)
-sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
-sha256sums_aarch64=('ed54a6f8531f29f7e7f398688b9bb098bf53f112262ae74a41d3ce73c6efb436')
+sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
+sha256sums_aarch64=('SKIP')
 
 export KBUILD_BUILD_HOST=archlinux
 export KBUILD_BUILD_USER=$pkgbase
@@ -156,6 +179,9 @@ prepare() {
 
   # EL2: pseudo-NMI para ver qué hace la CPU que se cuelga (irqchip.gicv3_pseudo_nmi=1 en la línea de arranque) 17-10
   scripts/config --enable ARM64_PSEUDO_NMI
+
+  # Cámaras 24-10: PHY CSI2 de Linaro (camss lo usa en X1E) y el sensor frontal IMX681
+  scripts/config --module PHY_QCOM_MIPI_CSI2 --module VIDEO_IMX681
 
   make olddefconfig
   diff -u ../config.$CARCH .config || :
